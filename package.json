@@ -1,0 +1,19 @@
+{
+  "name": "us-command-ultra",
+  "version": "13.0.0",
+  "description": "Risk-engineered US stock portfolio and market-theme intelligence command center for Render",
+  "private": true,
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=22.14.0 <25"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "build": "node --check server.js && node --check market-data.js",
+    "test": "node --test",
+    "check": "npm run build && npm test"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}
