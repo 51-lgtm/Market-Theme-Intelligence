@@ -1,7 +1,7 @@
-/* US COMMAND ULTRA v13.0.0 — market-theme intelligence offline shell */
+/* US COMMAND ULTRA v14.0.0 — technical buy-signal watch system */
 'use strict';
 
-const CACHE = 'uscmd-v13-0-0';
+const CACHE = 'uscmd-v14-0-1';
 const SHELL = ['/', '/index.html', '/manifest.json', '/icon-192.png', '/icon-512.png'];
 const CACHEABLE_PATHS = new Set(SHELL);
 
@@ -31,7 +31,7 @@ self.addEventListener('fetch', event => {
   const request = event.request;
   if (request.method !== 'GET') return;
   const url = new URL(request.url);
-  if (url.origin !== self.location.origin || url.pathname.startsWith('/api/') || url.pathname === '/healthz') return;
+  if (url.origin !== self.location.origin || url.pathname.startsWith('/api/') || url.pathname.startsWith('/astra') || url.pathname === '/healthz') return;
 
   if (request.mode === 'navigate' || url.pathname === '/' || url.pathname === '/index.html') {
     event.respondWith((async () => {

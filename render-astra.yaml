@@ -1,0 +1,33 @@
+# Opt-in Astra deployment; existing render.yaml still runs legacy v14 unchanged.
+services:
+  - type: web
+    name: us-command-astra-v2
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /healthz
+    envVars:
+      - key: ASTRA_ADMIN_PASSWORD
+        sync: false
+      - key: ASTRA_JWT_SECRET
+        generateValue: true
+      - key: COOKIE_SECURE
+        value: "true"
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_COMMANDER_MODEL
+        value: gpt-6-astra
+      - key: AUTO_TRADE
+        value: "false"
+      - key: LIVE_TRADING
+        value: "false"
+      - key: MANUAL_APPROVAL
+        value: "true"
+      - key: SHADOW_TRADING
+        value: "true"
+      - key: PAPER_TRADING
+        value: "false"
+      - key: BROKER_MODE
+        value: shadow
+      - key: ASTRA_DATABASE_PATH
+        value: /app/data/astra.sqlite3

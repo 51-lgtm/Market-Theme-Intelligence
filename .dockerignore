@@ -1,0 +1,15 @@
+.git
+.github-reference
+.venv
+node_modules
+frontend/node_modules
+frontend/dist
+data
+artifacts
+__pycache__
+.pytest_cache
+*.sqlite3*
+.env
+.env.*
+!.env.example
+*.log

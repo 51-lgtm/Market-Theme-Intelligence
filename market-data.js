@@ -1,9 +1,17 @@
 'use strict';
 
 const crypto = require('crypto');
+const {
+  BACKTEST_METHOD_VERSION,
+  SIMULATION_EXECUTION,
+  TECHNICAL_METHOD_VERSION,
+  buildBuySignalResult,
+  detectLeveragedProduct,
+  runTechnicalBacktest
+} = require('./technical-signals');
 
 const DEFAULT_HEADERS = Object.freeze({
-  'User-Agent': 'Mozilla/5.0 (compatible; USCommandUltra/13.0; +https://render.com)',
+  'User-Agent': 'Mozilla/5.0 (compatible; USCommandUltra/14.0.0; +https://render.com)',
   Accept: 'application/json,text/plain,*/*',
   'Accept-Language': 'en-US,en;q=0.9'
 });
@@ -33,6 +41,29 @@ const DEFAULT_INTELLIGENCE_CACHE_TTL_MS = 15 * 60 * 1000;
 const DEFAULT_INTELLIGENCE_PARTIAL_TTL_MS = 2 * 60 * 1000;
 const DEFAULT_INTELLIGENCE_STALE_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_INTELLIGENCE_DEADLINE_MS = 20_000;
+const DEFAULT_MARKET_REGIME_CACHE_TTL_MS = 15 * 60 * 1000;
+const DEFAULT_MARKET_REGIME_PARTIAL_TTL_MS = 2 * 60 * 1000;
+const DEFAULT_MARKET_REGIME_STALE_MS = 24 * 60 * 60 * 1000;
+const DEFAULT_MARKET_REGIME_DEADLINE_MS = 12_000;
+const DEFAULT_MARKET_REGIME_SPY_ADJUSTED_TTL_MS = 15 * 60 * 1000;
+const DEFAULT_TECHNICAL_CACHE_TTL_MS = 15 * 60 * 1000;
+const DEFAULT_TECHNICAL_STALE_MS = 24 * 60 * 60 * 1000;
+const DEFAULT_TECHNICAL_DEADLINE_MS = 25_000;
+const DEFAULT_TECHNICAL_TIMEOUT_MS = 8_000;
+const DEFAULT_TECHNICAL_BATCH_SIZE = 20;
+const DEFAULT_TECHNICAL_CHART_CONCURRENCY = 4;
+const DEFAULT_TECHNICAL_CACHE_MAX_ENTRIES = 120;
+const DEFAULT_TECHNICAL_FINNHUB_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+const DEFAULT_TECHNICAL_FINNHUB_MAX_SYMBOLS = 8;
+const MARKET_REGIME_MAX_OBSERVATION_AGE_MS = 96 * 60 * 60 * 1000;
+const MARKET_REGIME_METHOD_VERSION = 'vix-wti-spy-rules-v3';
+const MARKET_REGIME_SYMBOLS = Object.freeze(['^VIX', 'CL=F', 'SPY']);
+const MARKET_REGIME_HORIZONS = Object.freeze([1, 5, 20]);
+const RRG_LONG_SESSIONS = 63;
+const RRG_SHORT_SESSIONS = 5;
+const RRG_TRAIL_SESSIONS = 20;
+const RRG_TRAIL_POINTS = RRG_TRAIL_SESSIONS + 1;
+const RRG_METHOD_VERSION = 'rrg-spy-log-v1';
 const MAX_PROVIDER_OBSERVATION_SKEW_MS = 6 * 60 * 60 * 1000;
 const MAX_PREVIOUS_OBSERVATION_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_CLOSES = 66;
@@ -451,7 +482,7 @@ function parseYahooSpark(payload, retrievedAt, nowMs = Date.now()) {
   return out;
 }
 
-function normalizeHistoryPoints(chart) {
+function normalizeHistoryPoints(chart, symbol = '') {
   const timestamps = Array.isArray(chart?.timestamp) ? chart.timestamp : [];
   const rawCloses = Array.isArray(chart?.indicators?.quote?.[0]?.close)
     ? chart.indicators.quote[0].close
@@ -464,25 +495,42 @@ function normalizeHistoryPoints(chart) {
     : [];
   const byTimestamp = new Map();
   const length = Math.min(timestamps.length, rawCloses.length);
+  const preserveNonPositive = normalizeSymbol(symbol) === 'CL=F';
   for (let index = 0; index < length; index += 1) {
     const timestamp = Number(timestamps[index]);
     const rawClose = parseNumber(rawCloses[index]);
     const adjustedClose = parseNumber(adjustedCloses[index]);
     const volume = parseNumber(volumes[index]);
-    const useAdjusted = Number.isFinite(adjustedClose) && adjustedClose > 0;
+    const validAdjusted = Number.isFinite(adjustedClose) && (preserveNonPositive || adjustedClose > 0);
+    const validRaw = Number.isFinite(rawClose) && (preserveNonPositive || rawClose > 0);
+    const useAdjusted = validAdjusted;
     const close = useAdjusted ? adjustedClose : rawClose;
-    if (!Number.isFinite(timestamp) || timestamp <= 0 || !Number.isFinite(close) || close <= 0) continue;
+    if (!Number.isFinite(timestamp) || timestamp <= 0 || (!validAdjusted && !validRaw)) continue;
     byTimestamp.set(timestamp, {
       timestamp,
       at: new Date(timestamp * 1000).toISOString(),
       sessionDate: new Date(timestamp * 1000).toISOString().slice(0, 10),
       close: +close.toFixed(6),
-      rawClose: Number.isFinite(rawClose) && rawClose > 0 ? +rawClose.toFixed(6) : null,
+      rawClose: validRaw ? +rawClose.toFixed(6) : null,
       priceMode: useAdjusted ? 'adjusted' : 'raw',
       volume: Number.isFinite(volume) && volume >= 0 ? Math.round(volume) : null
     });
   }
   return [...byTimestamp.values()].sort((left, right) => left.timestamp - right.timestamp);
+}
+
+function consistentHistoryPoints(history) {
+  const points = Array.isArray(history?.points) ? history.points : [];
+  const adjustedOnly = history?.priceMode === 'adjusted';
+  return points.flatMap(point => {
+    const selectedClose = adjustedOnly ? parseNumber(point?.close) : parseNumber(point?.rawClose);
+    if (!(selectedClose > 0)) return [];
+    return [{
+      ...point,
+      close: selectedClose,
+      priceMode: adjustedOnly ? 'adjusted' : 'raw'
+    }];
+  });
 }
 
 function calendarTargetTimestamp(endTimestamp, period) {
@@ -550,11 +598,17 @@ function parseYahooThemeHistory(payload, nowMs = Date.now()) {
   for (const row of rows) {
     const symbol = normalizeSymbol(row?.symbol);
     const chart = row?.response?.[0];
-    const allPoints = normalizeHistoryPoints(chart);
+    const allPoints = normalizeHistoryPoints(chart, symbol);
     const marketState = inferMarketState(chart?.meta, nowMs);
     const regularMarketTime = Number(chart?.meta?.regularMarketTime) * 1000;
+    const currentRegularPeriod = chart?.meta?.currentTradingPeriod?.regular || {};
+    const regularMarketTimeSeconds = Number(chart?.meta?.regularMarketTime);
+    const regularMarketTimeIsCurrent = Number.isFinite(regularMarketTimeSeconds) &&
+      Number(currentRegularPeriod.start) <= regularMarketTimeSeconds &&
+      regularMarketTimeSeconds <= Number(currentRegularPeriod.end);
     const hasOpenSessionPoint = marketState === 'open' && allPoints.length > 0 &&
-      Number.isFinite(regularMarketTime) && sameUtcDate(allPoints.at(-1).timestamp * 1000, regularMarketTime);
+      Number.isFinite(regularMarketTime) && regularMarketTimeIsCurrent &&
+      sameUtcDate(allPoints.at(-1).timestamp * 1000, regularMarketTime);
     const points = hasOpenSessionPoint ? allPoints.slice(0, -1) : allPoints;
     if (symbol && points.length) {
       const adjusted = points.filter(point => point.priceMode === 'adjusted').length;
@@ -564,12 +618,148 @@ function parseYahooThemeHistory(payload, nowMs = Date.now()) {
         currency: chart?.meta?.currency || 'USD',
         exchange: chart?.meta?.fullExchangeName || chart?.meta?.exchangeName || null,
         priceMode: raw === 0 ? 'adjusted' : (adjusted ? 'mixed' : 'raw'),
+        source: 'yahoo-spark',
         excludedOpenSession: hasOpenSessionPoint,
         volumeAvailable: points.some(point => Number.isFinite(point.volume))
       });
     }
   }
   return histories;
+}
+
+function parseYahooChartHistory(payload, symbol, nowMs = Date.now()) {
+  const normalized = normalizeSymbol(symbol);
+  const chart = payload?.chart?.result?.[0];
+  if (!normalized || !chart) return null;
+  const histories = parseYahooThemeHistory({
+    spark: {
+      result: [{ symbol: normalized, response: [chart] }]
+    }
+  }, nowMs);
+  const history = histories.get(normalized);
+  return history ? { ...history, source: 'yahoo-chart-v8-adjusted' } : null;
+}
+
+function normalizeTechnicalBars(chart) {
+  const timestamps = Array.isArray(chart?.timestamp) ? chart.timestamp : [];
+  const quote = chart?.indicators?.quote?.[0] || {};
+  const opens = Array.isArray(quote.open) ? quote.open : [];
+  const highs = Array.isArray(quote.high) ? quote.high : [];
+  const lows = Array.isArray(quote.low) ? quote.low : [];
+  const closes = Array.isArray(quote.close) ? quote.close : [];
+  const volumes = Array.isArray(quote.volume) ? quote.volume : [];
+  const adjusted = Array.isArray(chart?.indicators?.adjclose?.[0]?.adjclose)
+    ? chart.indicators.adjclose[0].adjclose
+    : [];
+  const candidates = [];
+  const length = Math.min(timestamps.length, closes.length);
+  for (let index = 0; index < length; index += 1) {
+    const timestamp = Number(timestamps[index]);
+    const rawClose = parseNumber(closes[index]);
+    if (!Number.isFinite(timestamp) || timestamp <= 0 || !(rawClose > 0)) continue;
+    const rawOpen = parseNumber(opens[index]);
+    const rawHigh = parseNumber(highs[index]);
+    const rawLow = parseNumber(lows[index]);
+    if (!(rawOpen > 0) || !(rawHigh > 0) || !(rawLow > 0)) continue;
+    const open = rawOpen;
+    const high = rawHigh;
+    const low = rawLow;
+    const adjustedClose = parseNumber(adjusted[index]);
+    const volume = parseNumber(volumes[index]);
+    candidates.push({
+      timestamp,
+      at: new Date(timestamp * 1000).toISOString(),
+      sessionDate: new Date(timestamp * 1000).toISOString().slice(0, 10),
+      rawOpen: open,
+      rawHigh: Math.max(high, open, rawClose),
+      rawLow: Math.min(low, open, rawClose),
+      rawClose,
+      adjustedClose: adjustedClose > 0 ? adjustedClose : null,
+      volume: Number.isFinite(volume) && volume >= 0 ? Math.round(volume) : null
+    });
+  }
+  const useAdjusted = candidates.length > 0 &&
+    candidates.every(point => point.adjustedClose > 0 && point.rawClose > 0);
+  return candidates.map(point => {
+    const factor = useAdjusted ? point.adjustedClose / point.rawClose : 1;
+    return {
+      timestamp: point.timestamp,
+      at: point.at,
+      sessionDate: point.sessionDate,
+      open: +(point.rawOpen * factor).toFixed(6),
+      high: +(point.rawHigh * factor).toFixed(6),
+      low: +(point.rawLow * factor).toFixed(6),
+      close: +(useAdjusted ? point.adjustedClose : point.rawClose).toFixed(6),
+      rawClose: +point.rawClose.toFixed(6),
+      volume: point.volume,
+      priceMode: useAdjusted ? 'adjusted' : 'raw'
+    };
+  });
+}
+
+function parseYahooTechnicalHistory(payload, nowMs = Date.now()) {
+  const histories = new Map();
+  const rows = payload?.spark?.result;
+  if (!Array.isArray(rows)) return histories;
+  for (const row of rows) {
+    const symbol = normalizeSymbol(row?.symbol);
+    const chart = row?.response?.[0];
+    const allBars = normalizeTechnicalBars(chart);
+    const expectedBars = Array.isArray(chart?.timestamp)
+      ? chart.timestamp.filter((timestamp, index) => (
+          Number(timestamp) > 0 &&
+          (parseNumber(chart?.indicators?.quote?.[0]?.close?.[index]) ?? 0) > 0
+        )).length
+      : 0;
+    const marketState = inferMarketState(chart?.meta, nowMs);
+    const regularMarketTime = Number(chart?.meta?.regularMarketTime) * 1000;
+    const currentRegularPeriod = chart?.meta?.currentTradingPeriod?.regular || {};
+    const regularMarketTimeSeconds = Number(chart?.meta?.regularMarketTime);
+    const regularMarketTimeIsCurrent = Number.isFinite(regularMarketTimeSeconds) &&
+      Number(currentRegularPeriod.start) <= regularMarketTimeSeconds &&
+      regularMarketTimeSeconds <= Number(currentRegularPeriod.end);
+    const hasOpenSessionBar = marketState === 'open' && allBars.length > 0 &&
+      Number.isFinite(regularMarketTime) && regularMarketTimeIsCurrent &&
+      sameUtcDate(allBars.at(-1).timestamp * 1000, regularMarketTime);
+    const bars = hasOpenSessionBar ? allBars.slice(0, -1) : allBars;
+    if (!symbol || !bars.length) continue;
+    const adjusted = bars.every(bar => bar.priceMode === 'adjusted');
+    histories.set(symbol, {
+      bars,
+      currency: chart?.meta?.currency || 'USD',
+      exchange: chart?.meta?.fullExchangeName || chart?.meta?.exchangeName || null,
+      quoteType: chart?.meta?.quoteType || chart?.meta?.instrumentType || null,
+      instrumentType: chart?.meta?.instrumentType || chart?.meta?.quoteType || null,
+      longName: chart?.meta?.longName || null,
+      shortName: chart?.meta?.shortName || null,
+      priceMode: adjusted ? 'adjusted' : 'raw',
+      source: 'yahoo-spark-5y-1d',
+      range: '5y',
+      interval: '1d',
+      excludedOpenSession: hasOpenSessionBar,
+      volumeAvailable: bars.some(bar => Number.isFinite(bar.volume)),
+      ohlcCoveragePct: expectedBars
+        ? Math.round((allBars.length / expectedBars) * 100)
+        : 0,
+      partial: expectedBars > allBars.length
+    });
+  }
+  return histories;
+}
+
+function parseYahooTechnicalChartHistory(payload, requestedSymbol, nowMs = Date.now()) {
+  const chart = payload?.chart?.result?.[0];
+  const symbol = normalizeSymbol(chart?.meta?.symbol || requestedSymbol);
+  if (!chart || !symbol) return null;
+  const parsed = parseYahooTechnicalHistory({
+    spark: {
+      result: [{ symbol, response: [chart] }]
+    }
+  }, nowMs);
+  const history = parsed.get(symbol);
+  return history
+    ? { ...history, source: 'yahoo-chart-v8-5y-1d' }
+    : null;
 }
 
 function performanceValues(periods) {
@@ -604,7 +794,8 @@ function buildThemePayload(histories, retrievedAt) {
   const themes = THEME_CATALOG.map(entry => {
     const leaders = entry.members.map(member => {
       const history = histories.get(member.symbol);
-      if (!history?.points?.length) {
+      const historyPoints = consistentHistoryPoints(history);
+      if (!historyPoints.length) {
         unavailable.add(member.symbol);
         return {
           symbol: member.symbol,
@@ -623,11 +814,11 @@ function buildThemePayload(histories, retrievedAt) {
       }
 
       const periods = Object.fromEntries(Object.keys(THEME_PERIODS).map(key => {
-        const detail = calculatePeriodPerformance(history.points, key);
+        const detail = calculatePeriodPerformance(historyPoints, key);
         if (!detail) periodGaps.push({ symbol: member.symbol, period: key });
         return [key, detail];
       }));
-      const latest = history.points.at(-1);
+      const latest = historyPoints.at(-1);
       const complete = Object.values(periods).every(Boolean);
       return {
         symbol: member.symbol,
@@ -717,7 +908,7 @@ function buildThemePayload(histories, retrievedAt) {
         retry: 'missing symbols only, once on alternate host'
       },
       pricePolicy: {
-        performance: 'adjusted close preferred; raw close used only when adjusted close is unavailable',
+        performance: 'adjusted close preferred; a whole-symbol raw-close series is used when adjusted history is incomplete (pointwise mixing is forbidden)',
         currentPrice: 'latest confirmed raw session close',
         openSession: 'in-progress daily bar is excluded while the regular market is open',
         timestamps: 'provider timestamps identify trading sessions; returned values are session closes'
@@ -819,6 +1010,717 @@ const clamp = (value, minimum, maximum) => Math.min(maximum, Math.max(minimum, v
 const rounded = (value, digits = 6) => Number.isFinite(value) ? +value.toFixed(digits) : null;
 const mean = values => values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
 
+function marketRegimeClassification(score) {
+  if (!Number.isFinite(score)) return { id: 'unavailable', label: '判定不能' };
+  if (score <= 29) return { id: 'danger', label: '危険' };
+  if (score <= 44) return { id: 'caution', label: '警戒' };
+  if (score <= 64) return { id: 'neutral', label: '中立' };
+  return { id: 'optimistic', label: '楽観' };
+}
+
+function marketRegimePriceMode(history, symbol = '') {
+  if (symbol === '^VIX') return history?.priceMode === 'mixed' ? 'mixed-native-close-reference' : 'native-index-close';
+  if (symbol === 'CL=F') return history?.priceMode === 'mixed' ? 'mixed-native-close-reference' : 'native-futures-close';
+  if (history?.priceMode === 'adjusted') return 'adjusted-close';
+  if (history?.priceMode === 'mixed') return 'mixed-close-reference';
+  return 'raw-close-reference';
+}
+
+function marketRegimePointClose(history, point) {
+  const selected = history?.priceMode === 'adjusted'
+    ? parseNumber(point?.close)
+    : parseNumber(point?.rawClose);
+  return Number.isFinite(selected) ? selected : null;
+}
+
+function marketRegimePlausibleLevel(symbol, value) {
+  if (!Number.isFinite(value)) return false;
+  if (symbol === '^VIX') return value >= 5 && value <= 200;
+  if (symbol === 'CL=F') return value >= -100 && value <= 500;
+  if (symbol === 'SPY') return value >= 1 && value <= 100_000;
+  return value > 0;
+}
+
+function marketRegimeInstrument(symbol, history, canonicalDates, asOf) {
+  const points = Array.isArray(history?.points) ? history.points : [];
+  const byDate = new Map(points.flatMap(point => {
+    const date = point?.sessionDate || point?.at?.slice?.(0, 10);
+    return date ? [[date, point]] : [];
+  }));
+  const endIndex = canonicalDates.indexOf(asOf);
+  const endPoint = byDate.get(asOf) || null;
+  const level = marketRegimePointClose(history, endPoint);
+  const plausible = marketRegimePlausibleLevel(symbol, level);
+  const changesPct = {};
+  const changesPoints = {};
+  const baselines = {};
+  const missingHorizons = [];
+
+  for (const sessions of MARKET_REGIME_HORIZONS) {
+    const key = `${sessions}d`;
+    const baselineDate = endIndex >= sessions ? canonicalDates[endIndex - sessions] : null;
+    const baselinePoint = baselineDate ? byDate.get(baselineDate) : null;
+    const baseline = marketRegimePointClose(history, baselinePoint);
+    const valid = plausible && marketRegimePlausibleLevel(symbol, baseline) && level > 0 && baseline > 0;
+    changesPct[key] = valid ? rounded(((level / baseline) - 1) * 100, 3) : null;
+    changesPoints[key] = valid ? rounded(level - baseline, 3) : null;
+    baselines[key] = {
+      date: baselineDate,
+      level: valid ? rounded(baseline, 6) : null,
+      exactSession: Boolean(baselineDate && baselinePoint && valid)
+    };
+    if (!Number.isFinite(changesPct[key])) missingHorizons.push(key);
+  }
+
+  const priceMode = marketRegimePriceMode(history, symbol);
+  const endTrailIndex = canonicalDates.indexOf(asOf);
+  const trailDates = endTrailIndex >= 0
+    ? canonicalDates.slice(Math.max(0, endTrailIndex - 20), endTrailIndex + 1)
+    : [];
+  const trail = trailDates.map(date => {
+    const point = byDate.get(date);
+    const value = marketRegimePointClose(history, point);
+    return {
+      date,
+      value: marketRegimePlausibleLevel(symbol, value) ? rounded(value, 6) : null
+    };
+  });
+  const names = {
+    '^VIX': 'VIX',
+    'CL=F': 'WTI原油',
+    SPY: 'S&P 500 (SPY)'
+  };
+  const priceBasis = symbol === '^VIX'
+    ? { id: 'native-index-close', adjustmentApplicable: false, note: 'VIX指数のネイティブ終値' }
+    : (symbol === 'CL=F'
+        ? { id: 'continuous-front-month-futures-close', adjustmentApplicable: false, note: '限月ロールの影響を含む連続先物系列' }
+        : { id: 'etf-close', adjustmentApplicable: true, note: '未調整時は配当・分割の影響を含み得るETF終値' });
+  const instrumentContract = symbol === '^VIX'
+    ? { instrumentType: 'volatility-index', tradable: false, spot: true, continuousContract: false, rollAdjusted: false }
+    : (symbol === 'CL=F'
+        ? { instrumentType: 'continuous-front-month-futures', tradable: false, spot: false, continuousContract: true, rollAdjusted: false }
+        : { instrumentType: 'exchange-traded-fund', tradable: true, spot: false, continuousContract: false, rollAdjusted: false });
+  return {
+    symbol,
+    name: names[symbol] || symbol,
+    value: plausible ? rounded(level, 6) : null,
+    level: plausible ? rounded(level, 6) : null,
+    asOf,
+    status: !endPoint || !plausible ? 'unavailable' : (missingHorizons.length ? 'partial' : 'ok'),
+    changes: changesPct,
+    changesPct,
+    changesPoints,
+    trail,
+    baselines,
+    historySamples: points.filter(point => {
+      const date = point?.sessionDate || point?.at?.slice?.(0, 10);
+      return date && date <= asOf;
+    }).length,
+    priceMode,
+    source: history?.source || 'yahoo-spark',
+    priceBasis,
+    adjustmentApplicable: priceBasis.adjustmentApplicable,
+    ...instrumentContract,
+    adjusted: priceMode === 'adjusted-close',
+    plausible,
+    missingHorizons,
+    available: Boolean(endPoint && plausible),
+    invalidReason: !endPoint
+      ? 'exact-common-session-missing'
+      : (!Number.isFinite(level)
+          ? 'close-missing'
+          : (!plausible ? 'implausible-level' : null)),
+    returnUndefinedReason: symbol === 'CL=F' && plausible && level <= 0
+      ? 'nonpositive-futures-level'
+      : (missingHorizons.length ? 'exact-positive-endpoint-missing' : null)
+  };
+}
+
+function scoreMarketRegime(indicators) {
+  const vix = indicators?.vix || {};
+  const wti = indicators?.wti || {};
+  const spy = indicators?.spy || {};
+  const contributions = [];
+  const add = (factor, value, points, reason) => {
+    if (!Number.isFinite(value) || !Number.isFinite(points)) return;
+    contributions.push({ factor, value: rounded(value, 3), points, reason });
+  };
+
+  const vixLevel = vix.level;
+  if (Number.isFinite(vixLevel)) {
+    if (vixLevel >= 35) add('vix-level', vixLevel, -25, 'VIXが35以上で非常に高い予想変動域');
+    else if (vixLevel >= 30) add('vix-level', vixLevel, -20, 'VIXが30以上で高いストレス域');
+    else if (vixLevel >= 25) add('vix-level', vixLevel, -14, 'VIXが25以上で強い警戒域');
+    else if (vixLevel > 20) add('vix-level', vixLevel, -7, 'VIXが20を上回る高ボラティリティ域');
+    else if (vixLevel < 12) add('vix-level', vixLevel, 15, 'VIXが12未満の低ボラティリティ域');
+    else if (vixLevel <= 16) add('vix-level', vixLevel, 8, 'VIXが16以下の比較的穏やかな領域');
+    else add('vix-level', vixLevel, 0, 'VIXが通常域');
+  }
+
+  const vixRules = [
+    ['1d', 20, 10, -10, -6, -15, -8, 6, 3, 2, 1, -3, -1],
+    ['5d', 30, 15, -12, -7, -20, -10, 8, 4, 5, 3, -7, -3],
+    ['20d', 50, 25, -10, -6, -25, -12, 7, 3, 10, 5, -12, -5]
+  ];
+  const vixChangeContributions = [];
+  for (const [key, high, elevated, highPoints, elevatedPoints, low, easing, lowPoints, easingPoints,
+    pointHigh, pointElevated, pointLow, pointEasing] of vixRules) {
+    const value = vix.changesPct?.[key];
+    const pointsChange = vix.changesPoints?.[key];
+    if (!Number.isFinite(value)) continue;
+    const detail = Number.isFinite(pointsChange) ? `（${pointsChange >= 0 ? '+' : ''}${pointsChange}pt）` : '';
+    if (value >= high || pointsChange >= pointHigh) vixChangeContributions.push({ factor: `vix-${key}`, value, points: highPoints, reason: `VIXが${key}で急上昇${detail}` });
+    else if (value >= elevated || pointsChange >= pointElevated) vixChangeContributions.push({ factor: `vix-${key}`, value, points: elevatedPoints, reason: `VIXが${key}で上昇${detail}` });
+    else if (value <= low || pointsChange <= pointLow) vixChangeContributions.push({ factor: `vix-${key}`, value, points: lowPoints, reason: `VIXが${key}で大きく低下${detail}` });
+    else if (value <= easing || pointsChange <= pointEasing) vixChangeContributions.push({ factor: `vix-${key}`, value, points: easingPoints, reason: `VIXが${key}で低下${detail}` });
+  }
+  const strongestVixChange = (
+    vixChangeContributions.filter(contribution => contribution.points < 0)
+      .sort((left, right) => left.points - right.points)[0] ||
+    vixChangeContributions.filter(contribution => contribution.points > 0)
+      .sort((left, right) => right.points - left.points)[0]
+  );
+  if (strongestVixChange) add(strongestVixChange.factor, strongestVixChange.value, strongestVixChange.points, strongestVixChange.reason);
+
+  const spyRules = [
+    ['1d', -3, -1.5, -12, -7, 1.5, 0.75, 6, 3],
+    ['5d', -7, -4, -14, -9, 5, 2.5, 10, 6],
+    ['20d', -15, -8, -16, -11, 12, 7, 13, 8]
+  ];
+  const spyChangeContributions = [];
+  for (const [key, severe, weak, severePoints, weakPoints, strong, positive, strongPoints, positivePoints] of spyRules) {
+    const value = spy.changesPct?.[key];
+    if (!Number.isFinite(value)) continue;
+    if (value <= severe) spyChangeContributions.push({ factor: `spy-${key}`, value, points: severePoints, reason: `SPYが${key}で急落` });
+    else if (value <= weak) spyChangeContributions.push({ factor: `spy-${key}`, value, points: weakPoints, reason: `SPYが${key}で下落` });
+    else if (value >= strong) spyChangeContributions.push({ factor: `spy-${key}`, value, points: strongPoints, reason: `SPYが${key}で強く上昇` });
+    else if (value >= positive) spyChangeContributions.push({ factor: `spy-${key}`, value, points: positivePoints, reason: `SPYが${key}で上昇` });
+  }
+  const strongestSpyChange = (
+    spyChangeContributions.filter(contribution => contribution.points < 0)
+      .sort((left, right) => left.points - right.points)[0] ||
+    spyChangeContributions.filter(contribution => contribution.points > 0)
+      .sort((left, right) => right.points - left.points)[0]
+  );
+  if (strongestSpyChange) add(strongestSpyChange.factor, strongestSpyChange.value, strongestSpyChange.points, strongestSpyChange.reason);
+  else {
+    const representativeSpyChange = MARKET_REGIME_HORIZONS
+      .map(sessions => spy.changesPct?.[`${sessions}d`])
+      .filter(Number.isFinite)
+      .sort((left, right) => Math.abs(right) - Math.abs(left))[0];
+    if (Number.isFinite(representativeSpyChange)) {
+      add(
+        'spy-threshold-range',
+        representativeSpyChange,
+        0,
+        'SPYの1・5・20日変化は警戒・楽観の判定閾値内'
+      );
+    }
+  }
+
+  const oilStressRules = [
+    { key: '1d', oil: 7, vix: 10, spy: -2, points: -5 },
+    { key: '5d', oil: 12, vix: 15, spy: -4, points: -8 },
+    { key: '20d', oil: 20, vix: 25, spy: -8, points: -10 }
+  ];
+  const confirmedOilShock = oilStressRules
+    .filter(rule => Number.isFinite(wti.changesPct?.[rule.key]) &&
+      wti.changesPct[rule.key] >= rule.oil &&
+      ((Number.isFinite(vix.changesPct?.[rule.key]) && vix.changesPct[rule.key] >= rule.vix) ||
+       (Number.isFinite(spy.changesPct?.[rule.key]) && spy.changesPct[rule.key] <= rule.spy)))
+    .sort((left, right) => left.points - right.points)[0];
+  if (confirmedOilShock) {
+    add(
+      `wti-up-${confirmedOilShock.key}`,
+      wti.changesPct[confirmedOilShock.key],
+      confirmedOilShock.points,
+      `WTI急騰をVIX上昇またはSPY下落が確認（${confirmedOilShock.key}）`
+    );
+  } else if (MARKET_REGIME_HORIZONS.some(sessions => (wti.changesPct?.[`${sessions}d`] || 0) > 0)) {
+    add('wti-up-unconfirmed', Math.max(...MARKET_REGIME_HORIZONS.map(sessions => wti.changesPct?.[`${sessions}d`] || 0)), 0,
+      '原油上昇だけでは危険判定にしない');
+  }
+
+  const oilCollapseRules = [
+    { key: '1d', oil: -10, vixStress: 5, spyStress: -1, vixRelief: -5, spyRelief: 1, riskPoints: -4, reliefPoints: 2 },
+    { key: '5d', oil: -15, vixStress: 10, spyStress: -3, vixRelief: -8, spyRelief: 2, riskPoints: -7, reliefPoints: 4 },
+    { key: '20d', oil: -25, vixStress: 15, spyStress: -5, vixRelief: -10, spyRelief: 4, riskPoints: -10, reliefPoints: 6 }
+  ];
+  const oilCollapseCandidates = oilCollapseRules
+    .filter(rule => Number.isFinite(wti.changesPct?.[rule.key]) && wti.changesPct[rule.key] <= rule.oil)
+    .map(rule => {
+      const vixChange = vix.changesPct?.[rule.key];
+      const spyChange = spy.changesPct?.[rule.key];
+      const demandScare = (Number.isFinite(vixChange) && vixChange >= rule.vixStress) ||
+        (Number.isFinite(spyChange) && spyChange <= rule.spyStress);
+      const disinflationRelief = (Number.isFinite(vixChange) && vixChange <= rule.vixRelief) &&
+        (Number.isFinite(spyChange) && spyChange >= rule.spyRelief);
+      return {
+        ...rule,
+        context: demandScare ? 'demand-scare' : (disinflationRelief ? 'disinflation' : 'unconfirmed')
+      };
+    });
+  const oilDemandScare = oilCollapseCandidates
+    .filter(candidate => candidate.context === 'demand-scare')
+    .sort((left, right) => left.riskPoints - right.riskPoints)[0];
+  const oilRelief = oilCollapseCandidates
+    .filter(candidate => candidate.context === 'disinflation')
+    .sort((left, right) => right.reliefPoints - left.reliefPoints)[0];
+  const oilUnconfirmed = oilCollapseCandidates
+    .filter(candidate => candidate.context === 'unconfirmed')
+    .sort((left, right) => left.riskPoints - right.riskPoints)[0];
+  if (oilDemandScare) {
+    add(`wti-down-demand-scare-${oilDemandScare.key}`, wti.changesPct[oilDemandScare.key], oilDemandScare.riskPoints,
+      `WTI急落をVIX上昇またはSPY下落が伴う需要不安として警戒（${oilDemandScare.key}）`);
+  } else if (oilRelief) {
+    add(`wti-down-disinflation-${oilRelief.key}`, wti.changesPct[oilRelief.key], oilRelief.reliefPoints,
+      `WTI急落とVIX低下・SPY上昇の組合せをインフレ緩和として評価（${oilRelief.key}）`);
+  } else if (oilUnconfirmed) {
+    add(`wti-down-unconfirmed-${oilUnconfirmed.key}`, wti.changesPct[oilUnconfirmed.key], 0,
+      `WTI急落だけでは需要不安か供給要因かを断定しない（${oilUnconfirmed.key}）`);
+  }
+  if (!contributions.some(contribution => contribution.factor.startsWith('wti-'))) {
+    const representativeWtiChange = MARKET_REGIME_HORIZONS
+      .map(sessions => wti.changesPct?.[`${sessions}d`])
+      .filter(Number.isFinite)
+      .sort((left, right) => Math.abs(right) - Math.abs(left))[0];
+    if (Number.isFinite(representativeWtiChange)) {
+      add(
+        'wti-threshold-range',
+        representativeWtiChange,
+        0,
+        'WTIは確認済みの急騰・急落条件に該当せず、単独では危険判定にしない'
+      );
+    }
+  }
+
+  const rawScore = 50 + contributions.reduce((sum, contribution) => sum + contribution.points, 0);
+  let score = Math.round(clamp(rawScore, 0, 100));
+  let vixCap = 100;
+  if (Number.isFinite(vixLevel)) {
+    if (vixLevel >= 40) vixCap = 20;
+    else if (vixLevel >= 30) vixCap = 29;
+    else if (vixLevel >= 25) vixCap = 44;
+    else if (vixLevel > 20) vixCap = 64;
+    const previousVix = vix.trail?.at?.(-2)?.value;
+    if (Number.isFinite(previousVix) && previousVix >= 30 && vixLevel < 30) vixCap = Math.min(vixCap, 44);
+    else if (Number.isFinite(previousVix) && previousVix >= 25 && vixLevel < 25) vixCap = Math.min(vixCap, 64);
+  }
+  if (score > vixCap) {
+    add('vix-hard-cap', vixLevel, vixCap - score, `VIX水準による楽観上限 ${vixCap}`);
+    score = vixCap;
+  }
+  const classification = marketRegimeClassification(score);
+  const componentPoints = {};
+  for (const contribution of contributions) {
+    const component = contribution.factor.split('-')[0];
+    componentPoints[component] = (componentPoints[component] || 0) + contribution.points;
+  }
+  const ranked = [...contributions]
+    .filter(contribution => contribution.points !== 0)
+    .sort((left, right) => Math.abs(right.points) - Math.abs(left.points));
+  const rationaleContributions = ranked.slice(0, 5);
+  if (rationaleContributions.length < 3) {
+    const includedReasons = new Set(rationaleContributions.map(contribution => contribution.reason));
+    for (const contribution of contributions.filter(candidate => candidate.points === 0)) {
+      if (includedReasons.has(contribution.reason)) continue;
+      rationaleContributions.push(contribution);
+      includedReasons.add(contribution.reason);
+      if (rationaleContributions.length >= 3) break;
+    }
+  }
+
+  return {
+    score,
+    classification,
+    contributions,
+    componentPoints,
+    rationale: rationaleContributions.map(contribution => contribution.reason),
+    scale: { minimum: 0, maximum: 100, direction: '0=danger, 100=optimistic' }
+  };
+}
+
+function buildMarketRegimePayload(histories, retrievedAt) {
+  const source = histories instanceof Map ? histories : new Map();
+  const historiesBySymbol = new Map(MARKET_REGIME_SYMBOLS.map(symbol => [symbol, source.get(symbol)]));
+  const spyAdjustedRefreshFallback = historiesBySymbol.get('SPY')?.refreshFallback === true;
+  const spyAdjustedRefreshFallbackAgeMs = spyAdjustedRefreshFallback &&
+    Number.isFinite(Number(historiesBySymbol.get('SPY')?.refreshFallbackCacheAgeMs))
+    ? Math.max(0, Number(historiesBySymbol.get('SPY').refreshFallbackCacheAgeMs))
+    : null;
+  const datesFor = history => new Set((Array.isArray(history?.points) ? history.points : []).flatMap(point => {
+    const date = point?.sessionDate || point?.at?.slice?.(0, 10);
+    return date ? [date] : [];
+  }));
+  const spyHistory = historiesBySymbol.get('SPY');
+  const spyDates = [...datesFor(spyHistory)].sort();
+  const vixDates = datesFor(historiesBySymbol.get('^VIX'));
+  const oilDates = datesFor(historiesBySymbol.get('CL=F'));
+  const commonDates = spyDates.filter(date => vixDates.has(date) && oilDates.has(date));
+  const commonAsOf = commonDates.at(-1) || null;
+  const vixSpyDates = spyDates.filter(date => vixDates.has(date));
+  const fallbackVixDates = [...vixDates].sort();
+  const asOf = commonAsOf || vixSpyDates.at(-1) || fallbackVixDates.at(-1) || null;
+  const canonicalDates = spyDates.length ? spyDates : fallbackVixDates;
+  const latestSpyDate = spyDates.at(-1) || null;
+  const synchronizationLagSessions = commonAsOf && latestSpyDate
+    ? spyDates.filter(date => date > commonAsOf).length
+    : null;
+
+  const emptyIndicator = symbol => ({
+    symbol,
+    name: symbol === '^VIX' ? 'VIX' : (symbol === 'CL=F' ? 'WTI原油' : 'S&P 500 (SPY)'),
+    value: null,
+    level: null,
+    asOf,
+    status: 'unavailable',
+    changes: { '1d': null, '5d': null, '20d': null },
+    changesPct: { '1d': null, '5d': null, '20d': null },
+    changesPoints: { '1d': null, '5d': null, '20d': null },
+    trail: [],
+    baselines: {},
+    historySamples: 0,
+    priceMode: marketRegimePriceMode(historiesBySymbol.get(symbol), symbol),
+    source: historiesBySymbol.get(symbol)?.source || 'yahoo-spark',
+    priceBasis: symbol === '^VIX'
+      ? { id: 'native-index-close', adjustmentApplicable: false, note: 'VIX指数のネイティブ終値' }
+      : (symbol === 'CL=F'
+          ? { id: 'continuous-front-month-futures-close', adjustmentApplicable: false, note: '限月ロールの影響を含む連続先物系列' }
+          : { id: 'etf-close', adjustmentApplicable: true, note: '未調整時は配当・分割の影響を含み得るETF終値' }),
+    adjustmentApplicable: symbol === 'SPY',
+    instrumentType: symbol === '^VIX'
+      ? 'volatility-index'
+      : (symbol === 'CL=F' ? 'continuous-front-month-futures' : 'exchange-traded-fund'),
+    tradable: symbol === 'SPY',
+    spot: symbol === '^VIX',
+    continuousContract: symbol === 'CL=F',
+    rollAdjusted: false,
+    adjusted: false,
+    plausible: false,
+    missingHorizons: ['1d', '5d', '20d'],
+    available: false,
+    invalidReason: 'common-confirmed-session-unavailable'
+  });
+  const instrument = symbol => asOf
+    ? marketRegimeInstrument(symbol, historiesBySymbol.get(symbol), canonicalDates, asOf)
+    : emptyIndicator(symbol);
+  const indicators = {
+    vix: instrument('^VIX'),
+    wti: instrument('CL=F'),
+    spy: instrument('SPY')
+  };
+
+  const observedAt = asOf
+    ? ((Array.isArray(spyHistory?.points)
+        ? spyHistory.points.find(point => (point.sessionDate || point.at?.slice?.(0, 10)) === asOf)?.at
+        : null) ||
+       historiesBySymbol.get('^VIX')?.points?.find(point => (point.sessionDate || point.at?.slice?.(0, 10)) === asOf)?.at)
+    : null;
+  const retrievedMs = Date.parse(String(retrievedAt || ''));
+  const observedMs = Date.parse(String(observedAt || ''));
+  const validClock = Number.isFinite(retrievedMs) && Number.isFinite(observedMs);
+  const ageMs = validClock ? Math.max(0, retrievedMs - observedMs) : null;
+  const futureSkewMs = validClock ? observedMs - retrievedMs : null;
+  const observationStale = !validClock || futureSkewMs > 24 * 60 * 60 * 1000 ||
+    ageMs > MARKET_REGIME_MAX_OBSERVATION_AGE_MS || (synchronizationLagSessions != null && synchronizationLagSessions !== 0);
+
+  const allMetrics = Object.values(indicators).flatMap(value => [
+    value.level,
+    ...MARKET_REGIME_HORIZONS.map(sessions => value.changesPct[`${sessions}d`])
+  ]);
+  const availableMetrics = allMetrics.filter(Number.isFinite).length;
+  const missingMetrics = allMetrics.length - availableMetrics;
+  const missingSymbols = MARKET_REGIME_SYMBOLS.filter(symbol => !historiesBySymbol.get(symbol));
+  const invalidSymbols = Object.values(indicators)
+    .filter(value => !value.available || !value.plausible)
+    .map(value => value.symbol);
+  const spyPriceMode = indicators.spy.priceMode;
+  const mixedNative = [indicators.vix, indicators.wti]
+    .some(instrument => instrument.priceMode === 'mixed-native-close-reference');
+  const referenceOnly = spyPriceMode !== 'adjusted-close' || mixedNative;
+  const priceMode = mixedNative
+    ? 'mixed-native-close-reference'
+    : (referenceOnly ? spyPriceMode : 'instrument-native-with-adjusted-spy');
+  const dataComplete = Boolean(commonAsOf) && missingMetrics === 0 && invalidSymbols.length === 0;
+  const assessmentAvailable = dataComplete && !observationStale && synchronizationLagSessions === 0;
+  const riskOverride = !assessmentAvailable && !observationStale &&
+    Number.isFinite(indicators.vix.level) && indicators.vix.level >= 25;
+  const stateAvailable = assessmentAvailable || riskOverride;
+  const rawScored = scoreMarketRegime(indicators);
+  const previousRawScores = [];
+  if (assessmentAvailable) {
+    const endIndex = canonicalDates.indexOf(asOf);
+    for (const offset of [1, 2]) {
+      const previousDate = endIndex >= offset ? canonicalDates[endIndex - offset] : null;
+      if (!previousDate) continue;
+      const previousIndicators = {
+        vix: marketRegimeInstrument('^VIX', historiesBySymbol.get('^VIX'), canonicalDates, previousDate),
+        wti: marketRegimeInstrument('CL=F', historiesBySymbol.get('CL=F'), canonicalDates, previousDate),
+        spy: marketRegimeInstrument('SPY', historiesBySymbol.get('SPY'), canonicalDates, previousDate)
+      };
+      const previousComplete = Object.values(previousIndicators).every(value =>
+        Number.isFinite(value.level) &&
+        MARKET_REGIME_HORIZONS.every(sessions => Number.isFinite(value.changesPct[`${sessions}d`]))
+      );
+      if (previousComplete) {
+        previousRawScores.push({
+          date: previousDate,
+          score: scoreMarketRegime(previousIndicators).score
+        });
+      }
+    }
+  }
+  let scored = rawScored;
+  const previousScore = previousRawScores[0]?.score;
+  if (Number.isFinite(previousScore) && rawScored.score > previousScore + 12) {
+    const cappedScore = previousScore + 12;
+    const hysteresisContribution = {
+      factor: 'risk-improvement-hysteresis',
+      value: rawScored.score,
+      points: cappedScore - rawScored.score,
+      reason: '危険状態からの改善は1確定営業日あたり最大12点'
+    };
+    scored = {
+      ...rawScored,
+      score: cappedScore,
+      classification: marketRegimeClassification(cappedScore),
+      contributions: [...rawScored.contributions, hysteresisContribution],
+      componentPoints: {
+        ...rawScored.componentPoints,
+        hysteresis: (rawScored.componentPoints.hysteresis || 0) + hysteresisContribution.points
+      },
+      rationale: [hysteresisContribution.reason, ...rawScored.rationale].slice(0, 5),
+      rawScoreBeforeHysteresis: rawScored.score
+    };
+  }
+  const status = riskOverride
+    ? 'partial'
+    : (!asOf || availableMetrics < 4
+        ? 'unavailable'
+        : (assessmentAvailable && !referenceOnly ? 'ok' : 'partial'));
+  const completeness = allMetrics.length ? availableMetrics / allMetrics.length : 0;
+  const priceConfidenceCap = !referenceOnly ? 85 : ((mixedNative || spyPriceMode === 'mixed-close-reference') ? 50 : 65);
+  const confidence = Math.round(clamp(
+    Math.min(100 * completeness * (observationStale ? 0.25 : 1), priceConfidenceCap),
+    0,
+    100
+  ));
+  const warnings = [];
+  if (!commonAsOf) warnings.push('VIX・WTI・SPYの共通確定営業日がありません。');
+  if (synchronizationLagSessions > 0) warnings.push('共通営業日がSPYの最新確定日より古いため参考判定です。');
+  if (missingMetrics) warnings.push(`同一営業日の1D・5D・20D履歴が${missingMetrics}項目不足しています。`);
+  if (referenceOnly) warnings.push('SPYが未調整または混在終値のため、配当・分割の影響を含む参考判定です。');
+  if (observationStale) warnings.push('市場観測が古い、時刻が不正、または最新営業日に同期していません。');
+  if (invalidSymbols.length) warnings.push(`非正値・極端値・欠損を検出: ${[...new Set(invalidSymbols)].join(', ')}`);
+  if (indicators.wti.returnUndefinedReason) warnings.push('WTIがゼロ以下または正の厳密な比較点を欠くため、変化率は定義せず参考表示にします。');
+  if (spyAdjustedRefreshFallback) {
+    warnings.push('SPY調整後終値の再取得に失敗したため、同一営業日の正常キャッシュを有効期限内で再利用しています。');
+  }
+  warnings.push('VIX先物の期間構造は取得していません。スポットVIXと履歴のみの参考モデルです。');
+
+  const revisionInput = {
+    method: MARKET_REGIME_METHOD_VERSION,
+    asOf,
+    priceMode,
+    indicators: Object.fromEntries(Object.entries(indicators).map(([key, value]) => [
+      key,
+      { level: value.level, changesPct: value.changesPct, priceMode: value.priceMode, source: value.source, trail: value.trail }
+    ])),
+    previousRawScores,
+    finalScore: stateAvailable ? scored.score : null
+  };
+  const digest = crypto.createHash('sha256').update(JSON.stringify(revisionInput)).digest('hex').slice(0, 20);
+
+  return {
+    updatedAt: retrievedAt,
+    asOf,
+    observedAt: observedAt || null,
+    dataRevision: `market-regime-v3:${digest}`,
+    status,
+    partial: status !== 'ok',
+    regime: {
+      state: stateAvailable ? scored.classification.id : 'unavailable',
+      label: stateAvailable ? scored.classification.label : '判定不能',
+      labelJa: stateAvailable ? scored.classification.label : '判定不能',
+      optimismScore: stateAvailable ? scored.score : null,
+      riskScore: stateAvailable ? 100 - scored.score : null,
+      score: stateAvailable ? scored.score : null,
+      confidence,
+      assessmentStatus: riskOverride
+        ? 'partial'
+        : (assessmentAvailable ? (referenceOnly ? 'reference_only' : 'confirmed') : 'unavailable'),
+      referenceOnly,
+      watchOnly: referenceOnly || !assessmentAvailable,
+      displayEligible: stateAvailable,
+      tradeEligible: false,
+      decisionEligible: false,
+      dangerOverride: riskOverride,
+      rationale: stateAvailable ? scored.rationale : [],
+      reasons: stateAvailable ? scored.rationale : [],
+      contributions: stateAvailable ? scored.contributions : [],
+      componentPoints: stateAvailable ? scored.componentPoints : {},
+      previousRawScores,
+      scale: scored.scale
+    },
+    indicators,
+    instruments: indicators,
+    actualFundFlow: false,
+    tradingSignal: null,
+    tradeEligible: false,
+    referenceOnly,
+    watchOnly: referenceOnly || !assessmentAvailable,
+    action: 'monitor_only',
+    warnings,
+    availability: {
+      synchronizedConfirmedSession: {
+        available: Boolean(commonAsOf),
+        current: synchronizationLagSessions === 0,
+        asOf: commonAsOf,
+        latestSpyDate,
+        lagSessions: synchronizationLagSessions
+      },
+      adjustedClose: {
+        available: !referenceOnly,
+        priceMode,
+        displayEligible: assessmentAvailable,
+        tradeEligible: false
+      },
+      history: {
+        complete: dataComplete,
+        availableMetrics,
+        requiredMetrics: allMetrics.length,
+        missingMetrics
+      },
+      vixTermStructure: {
+        available: false,
+        used: false,
+        reason: 'VIX futures term structure is not fetched; spot VIX history only.'
+      },
+      actualFundFlow: { available: false, used: false },
+      tradingSignal: { available: false, value: null }
+    },
+    methodology: {
+      version: MARKET_REGIME_METHOD_VERSION,
+      symbols: { vix: '^VIX', oil: 'CL=F', equities: 'SPY' },
+      horizons: ['1d', '5d', '20d'],
+      canonicalCalendar: 'SPY confirmed sessions',
+      synchronization: 'exact same confirmed session and exact SPY 1/5/20-session endpoints; no fill and no nearest-date substitution',
+      priceSelection: 'VIX index close and CL=F continuous-futures close are native EOD inputs. SPY Yahoo Chart v8 adjusted close is preferred; Spark raw SPY or any mixed history is reference-only.',
+      scoreDirection: '0=danger, 100=optimistic',
+      thresholds: { danger: [0, 29], caution: [30, 44], neutral: [45, 64], optimistic: [65, 100] },
+      vixInterpretation: 'VIX is a 30-day expected-volatility measure, not an equity direction forecast; level and changes are combined with SPY.',
+      oilInterpretation: 'Oil has supply, demand, inventory and financial drivers. A rise alone is neutral; only a sharp rise confirmed by VIX stress or SPY weakness adds danger. A sharp fall adds demand-slowdown caution only with VIX stress or SPY weakness, can be disinflation relief with falling VIX and rising SPY, and is otherwise unconfirmed.',
+      futuresLimitation: 'CL=F is a rolling front-month futures series; contract rolls and adjustment choices can affect returns.',
+      vixTermStructureUsed: false,
+      sourceLimitations: 'Yahoo endpoints are unofficial best-effort single-source observations; adjusted SPY availability does not make the assessment trade-eligible.',
+      actualFundFlow: false,
+      predictive: false,
+      investmentAdvice: false
+    },
+    meta: {
+      status: status === 'unavailable' ? 'error' : status,
+      durationMs: 0,
+      cache: 'refreshed',
+      stale: false,
+      observationStale,
+      observationAgeMs: ageMs,
+      maximumObservationAgeMs: MARKET_REGIME_MAX_OBSERVATION_AGE_MS,
+      synchronizationLagSessions,
+      requestedSymbols: MARKET_REGIME_SYMBOLS.length,
+      returnedSymbols: MARKET_REGIME_SYMBOLS.length - missingSymbols.length,
+      source: {
+        provider: 'Yahoo Finance',
+        id: indicators.spy.source === 'yahoo-chart-v8-adjusted'
+          ? 'yahoo-spark+chart-v8-adjusted'
+          : 'yahoo-spark',
+        inputs: {
+          vix: indicators.vix.source,
+          wti: indicators.wti.source,
+          spy: indicators.spy.source
+        },
+        adjustedSpyUsed: indicators.spy.source === 'yahoo-chart-v8-adjusted',
+        adjustedSpyRefreshFallback: spyAdjustedRefreshFallback,
+        adjustedSpyRefreshFallbackAgeMs: spyAdjustedRefreshFallbackAgeMs,
+        official: false,
+        bestEffort: true
+      },
+      quality: {
+        coveragePct: Math.round(completeness * 100),
+        fresh: observationStale
+          ? 0
+          : Math.max(0, MARKET_REGIME_SYMBOLS.length - missingSymbols.length - (spyAdjustedRefreshFallback ? 1 : 0)),
+        live: 0,
+        closeValid: observationStale ? 0 : MARKET_REGIME_SYMBOLS.length - missingSymbols.length,
+        stale: observationStale ? MARKET_REGIME_SYMBOLS.length - missingSymbols.length : 0,
+        failed: missingSymbols.length + invalidSymbols.length,
+        delayed: spyAdjustedRefreshFallback ? 1 : 0,
+        aged: observationStale ? 1 : 0,
+        reference: referenceOnly ? 1 : 0,
+        unverified: missingMetrics,
+        consensusWarnings: 0,
+        grade: status === 'unavailable'
+          ? 'unavailable'
+          : (assessmentAvailable && !referenceOnly ? 'close-valid' : (assessmentAvailable ? 'reference-only' : 'watch-only'))
+      }
+    }
+  };
+}
+
+function selectMarketRegimePayload(payload, options = {}) {
+  const selected = JSON.parse(JSON.stringify(payload));
+  const stale = Boolean(options.stale);
+  const durationMs = Number.isFinite(options.durationMs) ? Math.max(0, options.durationMs) : 0;
+  if (stale && selected.status !== 'unavailable') {
+    selected.status = 'partial';
+    selected.partial = true;
+    selected.regime.state = 'unavailable';
+    selected.regime.label = '判定不能';
+    selected.regime.labelJa = '判定不能';
+    selected.regime.optimismScore = null;
+    selected.regime.riskScore = null;
+    selected.regime.score = null;
+    selected.regime.assessmentStatus = 'unavailable';
+    selected.regime.referenceOnly = true;
+    selected.regime.watchOnly = true;
+    selected.regime.displayEligible = false;
+    selected.regime.tradeEligible = false;
+    selected.regime.decisionEligible = false;
+    selected.regime.rationale = [];
+    selected.regime.reasons = [];
+    selected.regime.contributions = [];
+    selected.regime.componentPoints = {};
+    selected.referenceOnly = true;
+    selected.watchOnly = true;
+    selected.tradeEligible = false;
+    selected.warnings = [...new Set([
+      ...(selected.warnings || []),
+      '古いキャッシュ観測のため、レジームは参考表示のみです。'
+    ])];
+  }
+  selected.meta = {
+    ...(selected.meta || {}),
+    status: selected.status === 'unavailable' ? 'error' : selected.status,
+    durationMs,
+    cache: options.cache || 'refreshed',
+    cacheTier: options.cacheTier || selected.meta?.cacheTier || null,
+    stale,
+    cacheAgeMs: Number.isFinite(options.ageMs) ? Math.max(0, options.ageMs) : 0,
+    refreshRequested: options.refreshRequested === true,
+    refreshSuppressed: options.refreshSuppressed === true,
+    observationStale: stale || selected.meta?.observationStale === true,
+    quality: {
+      ...(selected.meta?.quality || {}),
+      fresh: stale ? 0 : (selected.meta?.quality?.fresh || 0),
+      closeValid: stale ? 0 : (selected.meta?.quality?.closeValid || 0),
+      stale: stale
+        ? Math.max(1, selected.meta?.returnedSymbols || 0)
+        : (selected.meta?.quality?.stale || 0),
+      grade: selected.status === 'unavailable' ? 'unavailable' : (stale ? 'stale' : selected.meta?.quality?.grade)
+    }
+  };
+  return selected;
+}
+
 function median(values) {
   const finite = values.filter(Number.isFinite).sort((left, right) => left - right);
   if (!finite.length) return null;
@@ -868,24 +1770,43 @@ function peerStability(sets) {
   return union.size ? intersection.length / union.size : 0;
 }
 
-function instrumentFeatures(history) {
+function instrumentFeatures(history, dates) {
   const features = new Map();
-  const points = history?.points || [];
-  for (let index = 0; index < points.length; index += 1) {
-    const current = points[index];
-    const date = current.sessionDate || current.at?.slice(0, 10);
-    if (!date || !(current.close > 0)) continue;
+  const points = consistentHistoryPoints(history);
+  const pointByDate = new Map(points.map(point => [
+    point.sessionDate || point.at?.slice(0, 10),
+    point
+  ]).filter(([date]) => date));
+  for (let index = 0; index < dates.length; index += 1) {
+    const date = dates[index];
+    const current = pointByDate.get(date);
+    if (!date || !(current?.close > 0)) continue;
     const period = sessions => {
-      const baseline = points[index - sessions];
+      const baselineDate = dates[index - sessions];
+      const baseline = pointByDate.get(baselineDate);
       if (!baseline || !(baseline.close > 0)) return null;
       const simple = clamp((current.close / baseline.close) - 1, -0.5, 0.5);
-      return { simple, log: Math.log1p(simple) };
+      return {
+        simple,
+        log: Math.log1p(simple),
+        baselineDate,
+        priceMode: current.priceMode === 'adjusted' && baseline.priceMode === 'adjusted'
+          ? 'adjusted-close'
+          : 'raw-close-fallback'
+      };
     };
+    const oneDay = period(1);
+    const fiveDay = period(5);
+    const twentyDay = period(20);
     features.set(date, {
       date,
-      oneDay: period(1),
-      fiveDay: period(5),
-      twentyDay: period(20)
+      oneDay,
+      fiveDay,
+      twentyDay,
+      priceMode: oneDay?.priceMode === 'adjusted-close' &&
+          fiveDay?.priceMode === 'adjusted-close' && twentyDay?.priceMode === 'adjusted-close'
+        ? 'adjusted-close'
+        : 'raw-close-fallback'
     });
   }
   return features;
@@ -894,15 +1815,24 @@ function instrumentFeatures(history) {
 function themeRawFeatures(entry, featureBySymbol, dates) {
   return dates.map(date => {
     const members = entry.relatedTickers
-      .map(symbol => featureBySymbol.get(symbol)?.get(date))
-      .filter(feature => feature?.fiveDay && feature?.twentyDay && feature?.oneDay);
+      .map(symbol => ({ symbol, feature: featureBySymbol.get(symbol)?.get(date) }))
+      .filter(item => item.feature?.fiveDay && item.feature?.twentyDay && item.feature?.oneDay);
     const coveragePct = (members.length / entry.relatedTickers.length) * 100;
+    const adjustedMembers = members.filter(item => item.feature.priceMode === 'adjusted-close').length;
+    const adjustedCoveragePct = (adjustedMembers / entry.relatedTickers.length) * 100;
     if (entry.relatedTickers.length < 4 || coveragePct < 80) {
-      return { date, eligible: false, coveragePct, available: members.length };
+      return {
+        date,
+        eligible: false,
+        coveragePct,
+        available: members.length,
+        adjustedCoveragePct,
+        priceMode: adjustedCoveragePct === 100 ? 'adjusted-close' : 'raw-close-fallback'
+      };
     }
-    const simple5 = members.map(feature => feature.fiveDay.simple);
-    const simple20 = members.map(feature => feature.twentyDay.simple);
-    const dailyLogs = members.map(feature => feature.oneDay.log);
+    const simple5 = members.map(item => item.feature.fiveDay.simple);
+    const simple20 = members.map(item => item.feature.twentyDay.simple);
+    const dailyLogs = members.map(item => item.feature.oneDay.log);
     const breadth = values => (
       (values.filter(value => value > 0).length - values.filter(value => value < 0).length) / values.length
     );
@@ -911,14 +1841,144 @@ function themeRawFeatures(entry, featureBySymbol, dates) {
       eligible: true,
       coveragePct,
       available: members.length,
-      r5: mean(members.map(feature => feature.fiveDay.log)),
-      r20: mean(members.map(feature => feature.twentyDay.log)),
+      adjustedCoveragePct,
+      priceMode: adjustedCoveragePct === 100 ? 'adjusted-close' : 'raw-close-fallback',
+      r5: mean(members.map(item => item.feature.fiveDay.log)),
+      r20: mean(members.map(item => item.feature.twentyDay.log)),
       breadth5: breadth(simple5),
       breadth20: breadth(simple20),
       dailyLogReturn: mean(dailyLogs),
       dailyReturnPct: (Math.exp(mean(dailyLogs)) - 1) * 100
     };
   });
+}
+
+function rrgQuadrant(longRelativePct, shortRelativePct) {
+  if (!Number.isFinite(longRelativePct) || !Number.isFinite(shortRelativePct)) return null;
+  if (longRelativePct >= 0 && shortRelativePct >= 0) return 'leader';
+  if (longRelativePct >= 0) return 'weakening';
+  if (shortRelativePct >= 0) return 'rebound';
+  return 'lagging';
+}
+
+function rrgCloseSeries(history) {
+  const points = consistentHistoryPoints(history);
+  return {
+    priceMode: history?.priceMode === 'adjusted' ? 'adjusted-close' : 'raw-close-fallback',
+    closes: new Map(points
+      .filter(point => (point.close > 0) && (point.sessionDate || point.at?.slice(0, 10)))
+      .map(point => [point.sessionDate || point.at.slice(0, 10), point.close]))
+  };
+}
+
+function buildThemeRrg(entry, closeBySymbol, benchmarkSeries, dates, rrgDates) {
+  const benchmarkCloses = benchmarkSeries.closes;
+  const dateIndex = new Map(dates.map((date, index) => [date, index]));
+  const trail = rrgDates.map(date => {
+    const index = dateIndex.get(date);
+    const longBaseDate = dates[index - RRG_LONG_SESSIONS];
+    const shortBaseDate = dates[index - RRG_SHORT_SESSIONS];
+    const benchmarkCurrent = benchmarkCloses.get(date);
+    const benchmarkLongBase = benchmarkCloses.get(longBaseDate);
+    const benchmarkShortBase = benchmarkCloses.get(shortBaseDate);
+    const members = entry.relatedTickers.map(symbol => {
+      const series = closeBySymbol.get(symbol),closes=series?.closes;
+      const current = closes?.get(date);
+      const longBase = closes?.get(longBaseDate);
+      const shortBase = closes?.get(shortBaseDate);
+      return current > 0 && longBase > 0 && shortBase > 0
+        ? { longLog: Math.log(current / longBase), shortLog: Math.log(current / shortBase), priceMode: series.priceMode }
+        : null;
+    }).filter(Boolean);
+    const coveragePct = (members.length / entry.relatedTickers.length) * 100;
+    const available = Number.isInteger(index) && coveragePct >= 80 && benchmarkCurrent > 0 &&
+      benchmarkLongBase > 0 && benchmarkShortBase > 0;
+    if (!available) {
+      return {
+        date,
+        longRelativePct: null,
+        shortRelativePct: null,
+        quadrant: null,
+        coveragePct: rounded(coveragePct),
+        status: 'unavailable'
+      };
+    }
+    const longRelativePct = (mean(members.map(member => member.longLog)) -
+      Math.log(benchmarkCurrent / benchmarkLongBase)) * 100;
+    const shortRelativePct = (mean(members.map(member => member.shortLog)) -
+      Math.log(benchmarkCurrent / benchmarkShortBase)) * 100;
+    return {
+      date,
+      longRelativePct: rounded(longRelativePct),
+      shortRelativePct: rounded(shortRelativePct),
+      quadrant: rrgQuadrant(longRelativePct, shortRelativePct),
+      coveragePct: rounded(coveragePct),
+      priceMode: benchmarkSeries.priceMode === 'adjusted-close' && members.every(member => member.priceMode === 'adjusted-close')
+        ? 'adjusted-close'
+        : 'raw-close-fallback',
+      status: coveragePct === 100 ? 'ok' : 'partial'
+    };
+  });
+  const current = trail.at(-1);
+  const valid = trail.filter(point => Number.isFinite(point.longRelativePct) && Number.isFinite(point.shortRelativePct));
+  const first = valid[0];
+  const previous = valid.length > 1 ? valid.at(-2) : null;
+  let quadrantSessions = 0;
+  if (current?.quadrant) {
+    for (let index = trail.length - 1; index >= 0 && trail[index]?.quadrant === current.quadrant; index -= 1) {
+      quadrantSessions += 1;
+    }
+  }
+  const currentAvailable = Number.isFinite(current?.longRelativePct) && Number.isFinite(current?.shortRelativePct);
+  const priceMode = valid.length && valid.every(point => point.priceMode === 'adjusted-close')
+    ? 'adjusted-close'
+    : 'raw-close-fallback';
+  return {
+    status: currentAvailable
+      ? (trail.length === RRG_TRAIL_POINTS && trail.every(point => point.status === 'ok') ? 'ok' : 'partial')
+      : 'unavailable',
+    benchmark: 'SPY',
+    priceMode,
+    dividendAdjusted: priceMode === 'adjusted-close',
+    qualityWarning: priceMode === 'adjusted-close'
+      ? null
+      : 'Yahoo Spark raw close fallback: dividends are excluded and corporate actions can distort historical comparisons.',
+    asOf: currentAvailable ? current.date : null,
+    longPeriodSessions: RRG_LONG_SESSIONS,
+    shortPeriodSessions: RRG_SHORT_SESSIONS,
+    trailSessions: RRG_TRAIL_SESSIONS,
+    longRelativePct: currentAvailable ? current.longRelativePct : null,
+    shortRelativePct: currentAvailable ? current.shortRelativePct : null,
+    quadrant: currentAvailable ? current.quadrant : null,
+    previousQuadrant: previous?.quadrant || null,
+    quadrantSessions,
+    movement: currentAvailable && first ? {
+      longDeltaPct: rounded(current.longRelativePct - first.longRelativePct),
+      shortDeltaPct: rounded(current.shortRelativePct - first.shortRelativePct),
+      fromDate: first.date,
+      toDate: current.date
+    } : null,
+    coverage: {
+      returned: valid.length,
+      requested: RRG_TRAIL_POINTS,
+      pct: rounded((valid.length / RRG_TRAIL_POINTS) * 100)
+    },
+    trail
+  };
+}
+
+function buildRrgData(histories, dates) {
+  const closeBySymbol = new Map([...histories].map(([symbol, history]) => [symbol, rrgCloseSeries(history)]));
+  const benchmarkSeries = closeBySymbol.get('SPY') || rrgCloseSeries(null);
+  const benchmarkCloses = benchmarkSeries.closes;
+  const rrgDates = dates.filter((date, index) => index >= RRG_LONG_SESSIONS &&
+    benchmarkCloses.get(date) > 0 && benchmarkCloses.get(dates[index - RRG_LONG_SESSIONS]) > 0 &&
+    benchmarkCloses.get(dates[index - RRG_SHORT_SESSIONS]) > 0).slice(-RRG_TRAIL_POINTS);
+  const byTheme = new Map(INTELLIGENCE_THEME_CATALOG.map(entry => [
+    entry.id,
+    buildThemeRrg(entry, closeBySymbol, benchmarkSeries, dates, rrgDates)
+  ]));
+  return { dates: rrgDates, byTheme, benchmarkPriceMode: benchmarkSeries.priceMode };
 }
 
 function intelligenceConfidence({ coveragePct, historySamples, breadth5, breadth20, partial }) {
@@ -959,7 +2019,8 @@ function entryFromMetrics(metric) {
 }
 
 function instrumentIntelligenceDetail(symbol, history, metadata = {}) {
-  if (!history?.points?.length) {
+  const historyPoints = consistentHistoryPoints(history);
+  if (!historyPoints.length) {
     return {
       symbol,
       name: metadata.name || symbol,
@@ -973,9 +2034,9 @@ function instrumentIntelligenceDetail(symbol, history, metadata = {}) {
       ...metadata
     };
   }
-  const periods = Object.fromEntries(Object.keys(THEME_PERIODS).map(key => [key, calculatePeriodPerformance(history.points, key)]));
+  const periods = Object.fromEntries(Object.keys(THEME_PERIODS).map(key => [key, calculatePeriodPerformance(historyPoints, key)]));
   const returned = Object.values(periods).filter(Boolean).length;
-  const latest = history.points.at(-1);
+  const latest = historyPoints.at(-1);
   return {
     symbol,
     name: metadata.name || symbol,
@@ -1036,6 +2097,92 @@ function laggedPairs(source, target, lag) {
   return pairs;
 }
 
+function chronologicalAssociationWindows(pairs) {
+  const recent = Array.isArray(pairs) ? pairs.slice(-160) : [];
+  if (recent.length < 160) return null;
+  return {
+    train: recent.slice(0, 100),
+    validation: recent.slice(100, 160),
+    pairs: recent
+  };
+}
+
+function revisionMaterial(value) {
+  const excluded = new Set([
+    '_internal',
+    'ageMs',
+    'cache',
+    'dataRevision',
+    'durationMs',
+    'evidenceIds',
+    'evidenceRevision',
+    'lastUpdated',
+    'observedEvidence',
+    'retrievedAt',
+    'revision',
+    'updatedAt'
+  ]);
+  const visit = current => {
+    if (Array.isArray(current)) return current.map(visit);
+    if (!current || typeof current !== 'object') return current;
+    return Object.fromEntries(Object.entries(current)
+      .filter(([key]) => !excluded.has(key))
+      .map(([key, nested]) => [key, visit(nested)]));
+  };
+  return visit(value);
+}
+
+function finalizeIntelligenceRevision(payload) {
+  const material = revisionMaterial(payload);
+  const digest = crypto.createHash('sha256').update(JSON.stringify(material)).digest('hex').slice(0, 16);
+  const revision = `theme-intelligence-v3:${digest}`;
+  payload.dataRevision = revision;
+  if (payload.meta) payload.meta.evidenceRevision = revision;
+  for (const theme of payload.themes || []) {
+    theme.dataRevision = revision;
+    theme.evidenceIds = [
+      `${revision}:theme:${theme.id}:return:1d`,
+      `${revision}:theme:${theme.id}:breadth5`,
+      `${revision}:theme:${theme.id}:score`,
+      `${revision}:theme:${theme.id}:velocity`,
+      `${revision}:theme:${theme.id}:rrg-long`,
+      `${revision}:theme:${theme.id}:rrg-short`
+    ];
+  }
+  for (const edge of payload.edges || []) edge.revision = revision;
+  for (const candidate of payload.nextCandidates || []) {
+    candidate.revision = revision;
+    candidate.evidenceIds = [
+      `${revision}:theme:${candidate.themeId}:score`,
+      `${revision}:theme:${candidate.themeId}:breadth5`,
+      `${revision}:theme:${candidate.themeId}:velocity`
+    ];
+  }
+  payload.observedEvidence = (payload.themes || []).flatMap(theme => [
+    { id: `${revision}:theme:${theme.id}:return:1d`, revision, type: 'observed-price', themeId: theme.id, metric: 'returnPct', value: theme.history.at(-1)?.returnPct ?? null, unit: 'percent', asOf: theme.history.at(-1)?.date || payload.asOf, source: theme.scorePriceMode === 'adjusted-close' ? 'yahoo-spark-adjusted-close' : 'yahoo-spark-raw-close', estimated: false },
+    { id: `${revision}:theme:${theme.id}:breadth5`, revision, type: 'observed-breadth', themeId: theme.id, metric: 'breadth5', value: theme.breadth5, unit: 'ratio', asOf: theme.history.at(-1)?.date || payload.asOf, source: 'yahoo-spark', estimated: false },
+    { id: `${revision}:theme:${theme.id}:score`, revision, type: 'estimated-rotation', themeId: theme.id, metric: 'score', value: theme.score, unit: 'proxy point', asOf: theme.history.at(-1)?.date || payload.asOf, source: 'relative-strength-breadth-model', estimated: true },
+    { id: `${revision}:theme:${theme.id}:velocity`, revision, type: 'estimated-rotation', themeId: theme.id, metric: 'flowVelocity', value: theme.flowVelocity, unit: 'score points/session', asOf: theme.history.at(-1)?.date || payload.asOf, source: 'relative-strength-breadth-model', estimated: true },
+    { id: `${revision}:theme:${theme.id}:rrg-long`, revision, type: 'observed-relative-price', themeId: theme.id, metric: 'rrgLongRelativePct', value: theme.rrg?.longRelativePct ?? null, unit: 'log-return percentage point versus SPY', asOf: theme.rrg?.asOf || payload.asOf, source: theme.rrg?.priceMode === 'adjusted-close' ? 'yahoo-spark-adjusted-close' : 'yahoo-spark-raw-close', estimated: false },
+    { id: `${revision}:theme:${theme.id}:rrg-short`, revision, type: 'observed-relative-price', themeId: theme.id, metric: 'rrgShortRelativePct', value: theme.rrg?.shortRelativePct ?? null, unit: 'log-return percentage point versus SPY', asOf: theme.rrg?.asOf || payload.asOf, source: theme.rrg?.priceMode === 'adjusted-close' ? 'yahoo-spark-adjusted-close' : 'yahoo-spark-raw-close', estimated: false }
+  ]);
+  for (const edge of (payload.edges || []).filter(edge => edge.eligible)) {
+    payload.observedEvidence.push({
+      id: `${revision}:${edge.id}:association`,
+      revision,
+      type: 'estimated-lag-association',
+      edgeId: edge.id,
+      metric: 'strength',
+      value: edge.strength,
+      unit: 'Spearman association x100',
+      asOf: payload.asOf,
+      source: 'relative-strength-breadth-model',
+      estimated: true
+    });
+  }
+  return payload;
+}
+
 function applyValidatedEdgeAssociations(payload) {
   const internal = payload._internal;
   if (!internal) return payload;
@@ -1080,10 +2227,9 @@ function applyValidatedEdgeAssociations(payload) {
 
     let best = null;
     for (let lag = 1; lag <= 5; lag += 1) {
-      const pairs = laggedPairs(source, target, lag).slice(-160);
-      if (pairs.length < 120) continue;
-      const train = pairs.slice(0, 100);
-      const validation = pairs.slice(-60);
+      const windows = chronologicalAssociationWindows(laggedPairs(source, target, lag));
+      if (!windows) continue;
+      const { train, validation, pairs } = windows;
       const rhoTrain = spearman(train);
       const rhoValidation = spearman(validation);
       if (!Number.isFinite(rhoTrain) || !Number.isFinite(rhoValidation)) continue;
@@ -1152,22 +2298,8 @@ function applyValidatedEdgeAssociations(payload) {
     edge.reason = 'Validated association omitted by the top-two outgoing/global-thirty display cap.';
     delete edge.correlation;
   }
-  for (const edge of payload.edges.filter(edge => edge.eligible)) {
-    payload.observedEvidence.push({
-      id: `${payload.dataRevision}:${edge.id}:association`,
-      revision: payload.dataRevision,
-      type: 'estimated-lag-association',
-      edgeId: edge.id,
-      metric: 'strength',
-      value: edge.strength,
-      unit: 'Spearman association ×100',
-      asOf: payload.asOf,
-      source: 'relative-strength-breadth-model',
-      estimated: true
-    });
-  }
   delete payload._internal;
-  return payload;
+  return finalizeIntelligenceRevision(payload);
 }
 
 function aggregateIntelligenceThemes(id, name, color, themes) {
@@ -1206,18 +2338,57 @@ function aggregateIntelligenceThemes(id, name, color, themes) {
   };
 }
 
+function intelligenceObservationFreshness(histories, retrievedAt) {
+  const benchmarkPoints = consistentHistoryPoints(histories.get('SPY'));
+  const latest = benchmarkPoints.at(-1) || null;
+  const observedAt = latest?.at || null;
+  const asOf = latest?.sessionDate || observedAt?.slice(0, 10) || null;
+  const retrievedMs = Date.parse(String(retrievedAt || ''));
+  const observedMs = Date.parse(String(observedAt || ''));
+  const validClock = Number.isFinite(retrievedMs) && Number.isFinite(observedMs);
+  const futureSkewMs = validClock ? observedMs - retrievedMs : null;
+  const ageMs = validClock ? Math.max(0, retrievedMs - observedMs) : null;
+  const stale = !latest || !validClock || futureSkewMs > 24 * 60 * 60 * 1000 ||
+    ageMs > MAX_PREVIOUS_OBSERVATION_AGE_MS;
+  return {
+    status: !latest ? 'unavailable' : (stale ? 'stale' : 'close-valid'),
+    stale,
+    benchmark: 'SPY',
+    asOf,
+    observedAt,
+    retrievedAt,
+    ageMs,
+    maximumAgeMs: MAX_PREVIOUS_OBSERVATION_AGE_MS,
+    transportCacheIndependent: true,
+    reason: !latest
+      ? 'SPY confirmed daily history is unavailable.'
+      : (!validClock
+          ? 'Observation or retrieval timestamp is invalid.'
+          : (futureSkewMs > 24 * 60 * 60 * 1000
+              ? 'Observation timestamp is implausibly ahead of retrieval time.'
+              : (ageMs > MAX_PREVIOUS_OBSERVATION_AGE_MS
+                  ? 'Latest confirmed SPY session is older than the market-observation limit.'
+                  : null)))
+  };
+}
+
 function buildIntelligencePayload(histories, retrievedAt) {
-  const featureBySymbol = new Map([...histories].map(([symbol, history]) => [symbol, instrumentFeatures(history)]));
-  const spyDates = (histories.get('SPY')?.points || [])
+  const observationFreshness = intelligenceObservationFreshness(histories, retrievedAt);
+  const spyDates = consistentHistoryPoints(histories.get('SPY'))
     .map(point => point.sessionDate || point.at?.slice(0, 10))
     .filter(Boolean);
-  const dates = spyDates.length
-    ? [...new Set(spyDates)].sort()
-    : [...new Set([...histories.values()].flatMap(history => history.points.map(point => point.sessionDate || point.at?.slice(0, 10))))].filter(Boolean).sort();
+  const dates = [...new Set(spyDates)].sort();
+  const featureBySymbol = new Map([...histories].map(([symbol, history]) => [
+    symbol,
+    instrumentFeatures(history, dates)
+  ]));
   const rawByTheme = new Map(INTELLIGENCE_THEME_CATALOG.map(entry => [
     entry.id,
     themeRawFeatures(entry, featureBySymbol, dates)
   ]));
+  const rrgData = buildRrgData(histories, dates);
+  const rrgDates = rrgData.dates;
+  const rrgByTheme = rrgData.byTheme;
   const scoreByTheme = new Map(INTELLIGENCE_THEME_CATALOG.map(entry => [entry.id, new Array(dates.length).fill(null)]));
   const peerSets = new Array(dates.length).fill(null);
   const innovations = new Map(INTELLIGENCE_THEME_CATALOG.map(entry => [entry.id, new Array(dates.length).fill(null)]));
@@ -1296,7 +2467,8 @@ function buildIntelligencePayload(histories, retrievedAt) {
       metric.trendDetail = trendDetailFromScore(metric.score, velocity);
       metric.trend = publicTrend(metric.trendDetail);
       metric.eligible = historySamples >= 60 && metric.coveragePct === 100 &&
-        metric.confidence >= 75 && stability >= 0.9;
+        metric.adjustedCoveragePct === 100 && metric.priceMode === 'adjusted-close' &&
+        metric.confidence >= 75 && stability >= 0.9 && !observationFreshness.stale;
       metric.entry = entryFromMetrics(metric);
     }
   }
@@ -1327,9 +2499,18 @@ function buildIntelligencePayload(histories, retrievedAt) {
       { ...instrument, instrumentType: instrument.leveraged ? 'leveraged-ETF' : 'related-instrument' }
     ));
     const currentCoverage = rawCurrent?.coveragePct || 0;
-    const status = !current
+    const rrg = rrgByTheme.get(entry.id);
+    if (rrg && observationFreshness.stale) {
+      rrg.stale = true;
+      if (rrg.status === 'ok') rrg.status = 'partial';
+      rrg.qualityWarning = [rrg.qualityWarning, observationFreshness.reason]
+        .filter(Boolean)
+        .join(' ');
+    }
+    const coverageStatus = !current
       ? (currentCoverage >= 80 ? 'partial' : 'unavailable')
       : (currentCoverage === 100 && constituents.every(item => item.status === 'ok') ? 'ok' : 'partial');
+    const status = observationFreshness.stale && coverageStatus === 'ok' ? 'partial' : coverageStatus;
     const history = series.slice(-30).map((metric, offset) => {
       const date = dates[dates.length - Math.min(30, dates.length) + offset];
       if (!metric) {
@@ -1350,6 +2531,9 @@ function buildIntelligencePayload(histories, retrievedAt) {
           peerCount: peerSets[dates.indexOf(date)]?.size || 0,
           peerSetHash: peerSets[dates.indexOf(date)] ? peerSetHash(peerSets[dates.indexOf(date)]) : null,
           peerStability: null,
+          coveragePct: raw?.coveragePct ?? 0,
+          adjustedCoveragePct: raw?.adjustedCoveragePct ?? 0,
+          priceMode: raw?.priceMode || null,
           status: 'unavailable'
         };
       }
@@ -1369,6 +2553,9 @@ function buildIntelligencePayload(histories, retrievedAt) {
         peerCount: metric.peerCount,
         peerSetHash: metric.peerSetHash,
         peerStability: rounded(metric.peerStability),
+        coveragePct: rounded(metric.coveragePct),
+        adjustedCoveragePct: rounded(metric.adjustedCoveragePct),
+        priceMode: metric.priceMode,
         status: metric.coveragePct === 100 ? 'ok' : 'partial'
       };
     });
@@ -1411,10 +2598,13 @@ function buildIntelligencePayload(histories, retrievedAt) {
         : (current?.entry === 'pullback_only' ? 'pullback-only' : (current?.entry || 'avoid')),
       eligible: Boolean(current?.eligible),
       scoreAvailable: Boolean(current?.scoreAvailable),
+      scorePriceMode: current?.priceMode || null,
+      decisionPriceEligible: Boolean(current?.priceMode === 'adjusted-close' && current?.adjustedCoveragePct === 100),
       historySamples: current?.historySamples || 0,
       peerCount: current?.peerCount || 0,
       peerSetHash: current?.peerSetHash || null,
       peerStability: rounded(current?.peerStability),
+      rrg,
       marketCapWeight: null,
       newsScore: null,
       newsCount: 0,
@@ -1427,15 +2617,70 @@ function buildIntelligencePayload(histories, retrievedAt) {
       history,
       status,
       availability: {
-        price: { available: Boolean(current), coveragePct: rounded(currentCoverage) },
+        price: {
+          available: Boolean(current),
+          coveragePct: rounded(currentCoverage),
+          priceMode: current?.priceMode || null,
+          decisionEligible: Boolean(current?.priceMode === 'adjusted-close' && current?.adjustedCoveragePct === 100),
+          observationFreshness
+        },
         volume: { available: false, used: false, reason: 'Yahoo Spark does not provide volume history.' },
         flowProxy: { available: false, value: null, reason: 'Actual fund/order flow is unavailable; rotation is estimated from price and breadth only.' },
         rotationProxy: { available: Boolean(current), estimated: true, unit: 'proxy point' },
+        rrg: {
+          available: rrg?.status !== 'unavailable',
+          status: rrg?.status || 'unavailable',
+          coveragePct: rrg?.coverage?.pct ?? 0,
+          benchmark: 'SPY',
+          reason: rrg?.status === 'unavailable' ? 'SPY or exact 63/5-session close endpoints are incomplete.' : (rrg?.qualityWarning || null)
+        },
         marketCapWeight: { available: false, value: null, used: false, reason: 'Point-in-time market-cap history is not connected.' },
         newsScore: { available: false, value: null, newsCount: 0, connected: false, used: false, reason: 'Verified news scoring is not connected.' }
       }
     };
   });
+
+  const rrgAvailableThemes = themes.filter(theme => theme.rrg?.status !== 'unavailable');
+  const rrgQuadrants = ['leader', 'weakening', 'rebound', 'lagging'];
+  const rrg = {
+    status: rrgDates.length === RRG_TRAIL_POINTS && rrgAvailableThemes.length === themes.length &&
+      rrgAvailableThemes.every(theme => theme.rrg.status === 'ok') ? 'ok' :
+      (rrgAvailableThemes.length ? 'partial' : 'unavailable'),
+    benchmark: 'SPY',
+    benchmarkName: 'S&P 500 ETF',
+    benchmarkPriceMode: rrgData.benchmarkPriceMode,
+    priceMode: rrgAvailableThemes.length && rrgAvailableThemes.every(theme => theme.rrg.priceMode === 'adjusted-close')
+      ? 'adjusted-close'
+      : 'raw-close-fallback',
+    dividendAdjusted: rrgAvailableThemes.length > 0 && rrgAvailableThemes.every(theme => theme.rrg.dividendAdjusted === true),
+    stale: observationFreshness.stale,
+    observationFreshness,
+    asOf: rrgDates.at(-1) || null,
+    dates: rrgDates,
+    longPeriodSessions: RRG_LONG_SESSIONS,
+    shortPeriodSessions: RRG_SHORT_SESSIONS,
+    trailSessions: RRG_TRAIL_SESSIONS,
+    availableThemeCount: rrgAvailableThemes.length,
+    themeCount: themes.length,
+    quadrantCounts: Object.fromEntries(rrgQuadrants.map(quadrant => [
+      quadrant,
+      rrgAvailableThemes.filter(theme => theme.rrg.quadrant === quadrant).length
+    ])),
+    methodology: {
+      name: 'RRG-style relative rotation graph',
+      version: RRG_METHOD_VERSION,
+      xAxis: '100 × (63-session equal-weight theme log return minus SPY log return)',
+      yAxis: '100 × (5-session equal-weight theme log return minus SPY log return)',
+      constituentWeighting: 'equal-weight current fixed basket',
+      priceMode: 'adjusted-close preferred; whole-series Yahoo Spark raw fallback is labeled and reference-only',
+      dividendsIncludedWhenRaw: false,
+      corporateActionAdjustedWhenRaw: false,
+      officialRrg: false,
+      currentBasketBackcast: true,
+      lookahead: false,
+      actualFundFlow: false
+    }
+  };
 
   const categoryAggregates = INTELLIGENCE_CATEGORIES.map(category => aggregateIntelligenceThemes(
     category.id,
@@ -1444,20 +2689,14 @@ function buildIntelligencePayload(histories, retrievedAt) {
     themes.filter(theme => theme.categoryId === category.id)
   ));
   const marketAggregate = aggregateIntelligenceThemes('market', 'MARKET', '#e2e8f0', themes);
-  const topStatus = themes.every(theme => theme.status === 'ok') && scoringMissingSymbols.length === 0
-    ? 'ok'
-    : (themes.some(theme => Number.isFinite(theme.score)) ? 'partial' : 'unavailable');
-  const dataFingerprint = themes.map(theme => [theme.id, theme.score, theme.constituents.map(item => [item.symbol, item.asOf, item.performance])]);
-  const dataRevision = `theme-intelligence-v1:${crypto.createHash('sha256').update(JSON.stringify(dataFingerprint)).digest('hex').slice(0, 16)}`;
-  for (const theme of themes) {
-    theme.dataRevision = dataRevision;
-    theme.evidenceIds = [
-      `${dataRevision}:theme:${theme.id}:return:1d`,
-      `${dataRevision}:theme:${theme.id}:breadth5`,
-      `${dataRevision}:theme:${theme.id}:score`,
-      `${dataRevision}:theme:${theme.id}:velocity`
-    ];
-  }
+  const scoringAvailable = themes.some(theme => Number.isFinite(theme.score));
+  const scoringComplete = themes.every(theme => theme.status === 'ok') && scoringMissingSymbols.length === 0;
+  const adjustedDecisionComplete = themes.every(theme => theme.decisionPriceEligible === true);
+  const topStatus = !scoringAvailable
+    ? 'unavailable'
+    : (scoringComplete && adjustedDecisionComplete && rrg.status === 'ok' && !observationFreshness.stale
+        ? 'ok'
+        : 'partial');
 
   const candidateEligible = topStatus === 'ok';
   const nextCandidates = candidateEligible
@@ -1471,22 +2710,12 @@ function buildIntelligencePayload(histories, retrievedAt) {
         themeId: theme.id,
         rank: index + 1,
         score: theme.score,
-        revision: dataRevision,
         reason: 'Fresh 100% basket passed score, estimated rotation, velocity, acceleration, breadth, confidence, and peer-stability gates.',
-        evidenceIds: [`${dataRevision}:theme:${theme.id}:score`, `${dataRevision}:theme:${theme.id}:breadth5`, `${dataRevision}:theme:${theme.id}:velocity`]
       }))
     : [];
 
-  const observedEvidence = themes.flatMap(theme => [
-    { id: `${dataRevision}:theme:${theme.id}:return:1d`, revision: dataRevision, type: 'observed-price', themeId: theme.id, metric: 'returnPct', value: theme.history.at(-1)?.returnPct ?? null, unit: 'percent', asOf, source: 'yahoo-spark', estimated: false },
-    { id: `${dataRevision}:theme:${theme.id}:breadth5`, revision: dataRevision, type: 'observed-breadth', themeId: theme.id, metric: 'breadth5', value: theme.breadth5, unit: 'ratio', asOf, source: 'yahoo-spark', estimated: false },
-    { id: `${dataRevision}:theme:${theme.id}:score`, revision: dataRevision, type: 'estimated-rotation', themeId: theme.id, metric: 'score', value: theme.score, unit: 'proxy point', asOf, source: 'relative-strength-breadth-model', estimated: true },
-    { id: `${dataRevision}:theme:${theme.id}:velocity`, revision: dataRevision, type: 'estimated-rotation', themeId: theme.id, metric: 'flowVelocity', value: theme.flowVelocity, unit: 'score points/session', asOf, source: 'relative-strength-breadth-model', estimated: true }
-  ]);
-
   const structuralEdges = INTELLIGENCE_STRUCTURAL_EDGES.map((edge, index) => ({
     id: `edge:${edge.from}:${edge.to}`,
-    revision: dataRevision,
     from: edge.from,
     fromTheme: edge.from,
     to: edge.to,
@@ -1517,7 +2746,7 @@ function buildIntelligencePayload(histories, retrievedAt) {
   return {
     updatedAt: retrievedAt,
     asOf,
-    dataRevision,
+    dataRevision: null,
     status: topStatus,
     partial: topStatus !== 'ok',
     actualFundFlow: false,
@@ -1534,24 +2763,45 @@ function buildIntelligencePayload(histories, retrievedAt) {
       minimumMembers: 4,
       minimumMemberCoveragePct: 80,
       minimumPeerThemes: 20,
+      sessionSynchronization: 'SPY canonical sessions with exact 1/5/20-session endpoints; missing endpoints are not filled',
+      decisionPriceRequirement: '100% adjusted-close endpoints; raw/mixed close results are reference-only',
       volumeUsed: false,
       marketCapUsed: false,
       newsUsed: false,
+      rrg: rrg.methodology,
       score50Meaning: 'Cross-sectional peer median, not neutral actual fund flow.'
     },
     availability: {
-      price: { available: scoringMissingSymbols.length < scoringSymbols.length, source: 'yahoo-spark', official: false, bestEffort: true },
+      price: {
+        available: scoringMissingSymbols.length < scoringSymbols.length,
+        source: 'yahoo-spark',
+        official: false,
+        bestEffort: true,
+        decisionEligible: adjustedDecisionComplete && !observationFreshness.stale,
+        observationFreshness,
+        reason: adjustedDecisionComplete
+          ? observationFreshness.reason
+          : 'One or more scoring baskets use raw/mixed close history; decision outputs are fail-closed.'
+      },
       volume: { available: false, used: false, reason: 'Yahoo Spark does not provide volume history.' },
       actualFundFlow: { available: false, value: false, reason: 'Fund subscriptions, redemptions, and order flow are not connected.' },
+      rrg: {
+        available: rrg.status !== 'unavailable',
+        status: rrg.status,
+        benchmark: 'SPY',
+        availableThemeCount: rrg.availableThemeCount,
+        themeCount: rrg.themeCount
+      },
       marketCapWeight: { available: false, value: null, used: false },
       newsScore: { available: false, value: null, newsCount: 0, connected: false, used: false }
     },
     summary: { market: marketAggregate },
+    rrg,
     categories: categoryAggregates,
     themes,
     edges: structuralEdges,
     nextCandidates,
-    observedEvidence,
+    observedEvidence: [],
     errors: missingSymbols,
     meta: {
       status: topStatus === 'unavailable' ? 'error' : topStatus,
@@ -1559,8 +2809,10 @@ function buildIntelligencePayload(histories, retrievedAt) {
       provider: { name: 'Yahoo Finance Spark', official: false, bestEffort: true },
       cache: 'refreshed',
       stale: false,
+      marketObservation: observationFreshness,
+      observationStale: observationFreshness.stale,
       catalogVersion: INTELLIGENCE_CATALOG_VERSION,
-      evidenceRevision: dataRevision,
+      evidenceRevision: null,
       membershipVersion: INTELLIGENCE_CATALOG_VERSION,
       effectiveAt: INTELLIGENCE_EFFECTIVE_AT,
       currentBasketBackcast: true,
@@ -1584,7 +2836,9 @@ function buildIntelligencePayload(histories, retrievedAt) {
         breadth: 'percent 0..100',
         breadth5: 'ratio -1..1',
         breadth20: 'ratio -1..1',
-        confidence: 'evidence quality 0..100, not probability'
+        confidence: 'evidence quality 0..100, not probability',
+        rrgLongRelativePct: 'percent 63-session relative to SPY',
+        rrgShortRelativePct: 'percent 5-session relative to SPY'
       },
       quality: {
         coveragePct: requestedSymbols.length ? Math.round(((requestedSymbols.length - missingSymbols.length) / requestedSymbols.length) * 100) : 0,
@@ -1598,7 +2852,9 @@ function buildIntelligencePayload(histories, retrievedAt) {
         reference: 0,
         unverified: themes.filter(theme => theme.status === 'partial').length,
         consensusWarnings: 0,
-        grade: topStatus === 'ok' ? 'close-valid' : (topStatus === 'partial' ? 'partial' : 'unavailable')
+        grade: topStatus === 'unavailable'
+          ? 'unavailable'
+          : (observationFreshness.stale ? 'stale' : (topStatus === 'ok' ? 'close-valid' : 'partial'))
       }
     },
     _internal: { dates, rawByTheme, scoreByTheme, innovations, peerSets }
@@ -1624,6 +2880,11 @@ function selectIntelligencePayload(payload, options = {}) {
   if (stale) {
     selected.status = selected.status === 'unavailable' ? 'unavailable' : 'partial';
     selected.partial = true;
+    if (selected.rrg?.status === 'ok') selected.rrg.status = 'partial';
+    if (selected.availability?.rrg) {
+      selected.availability.rrg.status = selected.rrg?.status || 'partial';
+      selected.availability.rrg.stale = true;
+    }
     selected.nextCandidates = [];
     for (const theme of selected.themes || []) {
       theme.cacheState = 'stale-fallback';
@@ -1631,6 +2892,11 @@ function selectIntelligencePayload(payload, options = {}) {
       theme.entry = theme.status === 'unavailable' ? 'avoid' : 'watch';
       theme.entrySignal = theme.entry;
       if (theme.status === 'ok') theme.status = 'partial';
+      if (theme.rrg?.status === 'ok') theme.rrg.status = 'partial';
+      if (theme.availability?.rrg) {
+        theme.availability.rrg.status = theme.rrg?.status || 'partial';
+        theme.availability.rrg.stale = true;
+      }
     }
     for (const edge of selected.edges || []) {
       if (!edge.eligible) continue;
@@ -1658,7 +2924,197 @@ function selectIntelligencePayload(payload, options = {}) {
     };
   }
   selected.meta.status = selected.status === 'unavailable' ? 'error' : selected.status;
-  return selected;
+  return stale ? finalizeIntelligenceRevision(selected) : selected;
+}
+
+function bestIntelligenceThemeForSymbol(payload, symbol) {
+  const normalized = normalizeSymbol(symbol);
+  const candidates = (payload?.themes || []).filter(theme => {
+    if (theme?.status !== 'ok') return false;
+    const related = Array.isArray(theme.relatedTickers)
+      ? theme.relatedTickers
+      : (Array.isArray(theme.constituents) ? theme.constituents : []);
+    return related.some(entry => normalizeSymbol(
+      typeof entry === 'string' ? entry : (entry?.symbol || entry?.ticker)
+    ) === normalized);
+  });
+  candidates.sort((left, right) => {
+    const scoreDifference = (parseNumber(right?.score) ?? -Infinity) -
+      (parseNumber(left?.score) ?? -Infinity);
+    if (scoreDifference) return scoreDifference;
+    return (parseNumber(right?.confidence) ?? -Infinity) -
+      (parseNumber(left?.confidence) ?? -Infinity);
+  });
+  if (!candidates.length) return null;
+  const selected = candidates[0];
+  return {
+    id: selected.id,
+    name: selected.name,
+    status: 'ok',
+    score: selected.score,
+    estimatedRotationIndex: selected.estimatedRotationIndex ?? selected.netFlow ?? null,
+    breadth: selected.breadth,
+    confidence: selected.confidence,
+    trend: selected.trend,
+    asOf: selected.asOf || payload?.asOf || null
+  };
+}
+
+function technicalUnavailableResult(symbol, reason, kind = 'signal') {
+  const normalized = normalizeSymbol(symbol);
+  const leverageDetection = detectLeveragedProduct(normalized, {});
+  const common = {
+    symbol: normalized,
+    ticker: normalized,
+    status: 'unavailable',
+    available: false,
+    active: false,
+    asOf: null,
+    warnings: [String(reason || 'Technical history is unavailable.')],
+    execution: { ...SIMULATION_EXECUTION },
+    tradeEligible: false
+  };
+  if (kind === 'backtest') {
+    return {
+      ...common,
+      backtest: {
+        status: 'unavailable',
+        methodVersion: BACKTEST_METHOD_VERSION,
+        reason: String(reason || 'Technical history is unavailable.'),
+        strategies: []
+      },
+      quality: {
+        priceMode: null,
+        dailyBars: 0,
+        source: null,
+        cacheState: null,
+        stale: false
+      },
+      provenance: {
+        source: null,
+        range: '5y',
+        interval: '1d',
+        methodVersion: BACKTEST_METHOD_VERSION
+      }
+    };
+  }
+  const unavailableSignals = [
+    ['rsiRecovery', 'RSI売られ過ぎ反転'],
+    ['macdGoldenCross', 'MACDゴールデンクロス'],
+    ['ema20Recovery', 'EMA20回復'],
+    ['ema50Recovery', 'EMA50回復'],
+    ['volumeExpansion', '出来高拡大'],
+    ['supportBounce', '支持帯反発'],
+    ['themeStrength', 'テーマ強度'],
+    ['fundamentalNews', '決算・材料']
+  ].map(([key, label]) => ({
+    key,
+    label,
+    available: false,
+    passed: null,
+    active: null,
+    state: null,
+    status: 'unavailable',
+    value: null,
+    detail: String(reason || 'Technical history is unavailable.'),
+    reason: String(reason || 'Technical history is unavailable.')
+  }));
+  return {
+    ...common,
+    dataStatus: 'unavailable',
+    price: null,
+    score: 0,
+    decision: 'unavailable',
+    recommendation: 'unavailable',
+    signals: {
+      ...Object.fromEntries(unavailableSignals.map(signal => [signal.key, 'unavailable'])),
+      active: 0,
+      available: 0,
+      total: 8,
+      checks: unavailableSignals
+    },
+    signalsList: unavailableSignals,
+    indicators: { daily: null, weekly: null },
+    technical: {
+      daily: null,
+      weekly: null,
+      supportCandidates: [],
+      vwap: { status: 'unavailable', available: false },
+      volumeProfile: { status: 'unavailable', available: false }
+    },
+    scoreBreakdown: {
+      maximum: 100,
+      groups: [],
+      rawScore: 0,
+      deductions: [],
+      caps: [],
+      finalScore: 0
+    },
+    theme: { status: 'unavailable', id: null, name: null, score: null },
+    fundamental: {
+      status: 'unavailable',
+      metrics: null,
+      earnings: [],
+      earningsCalendar: [],
+      news: [],
+      reason: 'Finnhub補助データは未接続です'
+    },
+    quality: {
+      coveragePct: 0,
+      dailyBars: 0,
+      weeklyBars: 0,
+      priceMode: null,
+      adjusted: false,
+      stale: false,
+      sufficient: false,
+      source: null,
+      cacheState: null,
+      cacheAgeMs: null
+    },
+    riskReward: null,
+    riskRewardDetail: {
+      available: false,
+      ratio: null,
+      minimum: 1.8,
+      eligible: false,
+      passed: false,
+      blocked: true,
+      entry: null,
+      stop: null,
+      take: null
+    },
+    positionPlan: {
+      mode: 'SIMULATE',
+      available: false,
+      amount: 0,
+      amountJpy: 0,
+      amountUsd: 0,
+      shares: 0,
+      entry: null,
+      stop: null,
+      take: null,
+      reason: String(reason || 'Technical history is unavailable.'),
+      tradeEligible: false
+    },
+    leveragedProduct: leverageDetection.leveraged === true,
+    leverageStatus: leverageDetection.status,
+    leverageBlocked: leverageDetection.status !== 'unleveraged',
+    leverageProvenance: leverageDetection,
+    chaseBlocked: false,
+    earningsDays: null,
+    earningsBlocked: false,
+    reasons: [],
+    provenance: {
+      source: null,
+      priceMode: null,
+      range: '5y',
+      interval: '1d',
+      methodVersion: TECHNICAL_METHOD_VERSION,
+      leverage: leverageDetection,
+      vwap: { available: false, reason: 'Intraday bars are not connected.' },
+      volumeProfile: { available: false, reason: 'Price-at-volume history is not connected.' }
+    }
+  };
 }
 
 async function mapLimit(items, concurrency, worker) {
@@ -1719,6 +3175,44 @@ class MarketDataService {
     this.intelligencePartialTtlMs = Number(options.intelligencePartialTtlMs || process.env.INTELLIGENCE_PARTIAL_CACHE_TTL_MS) || DEFAULT_INTELLIGENCE_PARTIAL_TTL_MS;
     this.intelligenceStaleMs = Number(options.intelligenceStaleMs || process.env.INTELLIGENCE_STALE_TTL_MS) || DEFAULT_INTELLIGENCE_STALE_MS;
     this.intelligenceDeadlineMs = Number(options.intelligenceDeadlineMs || process.env.INTELLIGENCE_DATA_DEADLINE_MS) || DEFAULT_INTELLIGENCE_DEADLINE_MS;
+    this.marketRegimeTtlMs = Number(options.marketRegimeTtlMs || process.env.MARKET_REGIME_CACHE_TTL_MS) || DEFAULT_MARKET_REGIME_CACHE_TTL_MS;
+    this.marketRegimePartialTtlMs = Number(options.marketRegimePartialTtlMs || process.env.MARKET_REGIME_PARTIAL_CACHE_TTL_MS) || DEFAULT_MARKET_REGIME_PARTIAL_TTL_MS;
+    this.marketRegimeStaleMs = Number(options.marketRegimeStaleMs || process.env.MARKET_REGIME_STALE_TTL_MS) || DEFAULT_MARKET_REGIME_STALE_MS;
+    this.marketRegimeDeadlineMs = Number(options.marketRegimeDeadlineMs || process.env.MARKET_REGIME_DATA_DEADLINE_MS) || DEFAULT_MARKET_REGIME_DEADLINE_MS;
+    this.marketRegimeSpyAdjustedTtlMs = Number(
+      options.marketRegimeSpyAdjustedTtlMs || process.env.MARKET_REGIME_SPY_ADJUSTED_TTL_MS
+    ) || DEFAULT_MARKET_REGIME_SPY_ADJUSTED_TTL_MS;
+    this.technicalTtlMs = Number(
+      options.technicalTtlMs || process.env.TECHNICAL_CACHE_TTL_MS
+    ) || DEFAULT_TECHNICAL_CACHE_TTL_MS;
+    this.technicalStaleMs = Number(
+      options.technicalStaleMs || process.env.TECHNICAL_STALE_TTL_MS
+    ) || DEFAULT_TECHNICAL_STALE_MS;
+    this.technicalDeadlineMs = Number(
+      options.technicalDeadlineMs || process.env.TECHNICAL_DATA_DEADLINE_MS
+    ) || DEFAULT_TECHNICAL_DEADLINE_MS;
+    this.technicalTimeoutMs = Number(
+      options.technicalTimeoutMs || process.env.TECHNICAL_UPSTREAM_TIMEOUT_MS
+    ) || DEFAULT_TECHNICAL_TIMEOUT_MS;
+    this.technicalBatchSize = Math.min(20, Math.max(1,
+      Number(options.technicalBatchSize || process.env.TECHNICAL_YAHOO_BATCH_SIZE) ||
+        DEFAULT_TECHNICAL_BATCH_SIZE
+    ));
+    this.technicalChartConcurrency = Math.min(6, Math.max(1,
+      Number(options.technicalChartConcurrency || process.env.TECHNICAL_CHART_CONCURRENCY) ||
+        DEFAULT_TECHNICAL_CHART_CONCURRENCY
+    ));
+    this.technicalCacheMaxEntries = Math.max(20,
+      Number(options.technicalCacheMaxEntries || process.env.TECHNICAL_CACHE_MAX_ENTRIES) ||
+        DEFAULT_TECHNICAL_CACHE_MAX_ENTRIES
+    );
+    this.technicalFinnhubCacheTtlMs = Number(
+      options.technicalFinnhubCacheTtlMs || process.env.TECHNICAL_FINNHUB_CACHE_TTL_MS
+    ) || DEFAULT_TECHNICAL_FINNHUB_CACHE_TTL_MS;
+    this.technicalFinnhubMaxSymbols = Math.min(20, Math.max(0,
+      Number(options.technicalFinnhubMaxSymbols ?? process.env.TECHNICAL_FINNHUB_MAX_SYMBOLS) ||
+        DEFAULT_TECHNICAL_FINNHUB_MAX_SYMBOLS
+    ));
     this.finnhubKey = options.finnhubKey ?? process.env.FINNHUB_API_KEY ?? '';
     this.cache = new Map();
     this.negativeCache = new Map();
@@ -1727,6 +3221,17 @@ class MarketDataService {
     this.historyCache = new Map();
     this.intelligenceCache = null;
     this.intelligenceInFlight = null;
+    this.marketRegimeCache = null;
+    this.marketRegimePartialCache = null;
+    this.marketRegimeInFlight = null;
+    this.marketRegimeInFlightForce = false;
+    this.marketRegimeForceQueued = null;
+    this.marketRegimeSpyAdjustedCache = null;
+    this.marketRegimeSpyAdjustedInFlight = null;
+    this.technicalHistoryCache = new Map();
+    this.technicalHistoryInFlight = null;
+    this.technicalFinnhubCache = new Map();
+    this.technicalFinnhubInFlight = new Map();
     // Provider work is deliberately detached from any one HTTP client. Each
     // caller races the shared promise with its own deadline/AbortSignal.
     this.inFlight = new Map();
@@ -2187,6 +3692,14 @@ class MarketDataService {
     return { ageMs, value: this.intelligenceCache.value };
   }
 
+  _marketRegimeCacheLookup(maxAgeMs, tier = 'complete') {
+    const cache = tier === 'partial' ? this.marketRegimePartialCache : this.marketRegimeCache;
+    if (!cache) return null;
+    const ageMs = Math.max(0, this.now() - cache.savedAt);
+    if (ageMs > maxAgeMs) return null;
+    return { ageMs, savedAt: cache.savedAt, tier, value: cache.value };
+  }
+
   _historyCacheLookup(symbol, maxAgeMs) {
     const entry = this.historyCache.get(symbol);
     if (!entry) return null;
@@ -2205,12 +3718,15 @@ class MarketDataService {
     }
   }
 
-  async _yahooThemeHistory(symbols, context) {
+  async _yahooThemeHistory(symbols, context, options = {}) {
     const collected = new Map();
     const unique = [...new Set(symbols.map(normalizeSymbol).filter(Boolean))];
     const missing = [];
+    const bypassCache = options.bypassCache === true;
     for (const symbol of unique) {
-      const cached = this._historyCacheLookup(symbol, Math.min(this.themeTtlMs, this.intelligenceTtlMs));
+      const cached = bypassCache
+        ? null
+        : this._historyCacheLookup(symbol, Math.min(this.themeTtlMs, this.intelligenceTtlMs));
       if (cached) collected.set(symbol, cached);
       else missing.push(symbol);
     }
@@ -2248,6 +3764,188 @@ class MarketDataService {
       }
     }
     return collected;
+  }
+
+  _technicalHistoryCacheLookup(symbol, maxAgeMs) {
+    const entry = this.technicalHistoryCache.get(symbol);
+    if (!entry) return null;
+    const ageMs = Math.max(0, this.now() - entry.savedAt);
+    if (ageMs > maxAgeMs) return null;
+    this.technicalHistoryCache.delete(symbol);
+    this.technicalHistoryCache.set(symbol, entry);
+    return {
+      ageMs,
+      value: {
+        ...entry.value,
+        bars: (entry.value?.bars || []).map(bar => ({ ...bar }))
+      }
+    };
+  }
+
+  _setTechnicalHistoryCache(symbol, history) {
+    if (!history?.bars?.length) return;
+    this.technicalHistoryCache.delete(symbol);
+    this.technicalHistoryCache.set(symbol, {
+      savedAt: this.now(),
+      value: {
+        ...history,
+        bars: history.bars.map(bar => ({ ...bar }))
+      }
+    });
+    while (this.technicalHistoryCache.size > this.technicalCacheMaxEntries) {
+      this.technicalHistoryCache.delete(this.technicalHistoryCache.keys().next().value);
+    }
+  }
+
+  async _yahooTechnicalHistory(symbols, context) {
+    const collected = new Map();
+    const unique = [...new Set(symbols.map(normalizeSymbol).filter(Boolean))];
+    for (let offset = 0; offset < unique.length; offset += this.technicalBatchSize) {
+      let remaining = unique.slice(offset, offset + this.technicalBatchSize);
+      for (const host of ['query1', 'query2']) {
+        if (!remaining.length || !this._contextActive(context)) break;
+        const requested = new Set(remaining);
+        const params = new URLSearchParams({
+          symbols: remaining.join(','),
+          range: '5y',
+          interval: '1d',
+          events: 'div,splits',
+          includePrePost: 'false'
+        });
+        try {
+          const payload = await this._requestJson(
+            `yahoo-technical-${host}`,
+            `https://${host}.finance.yahoo.com/v7/finance/spark?${params}`,
+            { timeoutMs: this.technicalTimeoutMs, context }
+          );
+          const parsed = parseYahooTechnicalHistory(payload, this.now());
+          for (const [symbol, history] of parsed) {
+            if (!requested.has(symbol)) continue;
+            collected.set(symbol, history);
+            this._setTechnicalHistoryCache(symbol, history);
+          }
+          remaining = remaining.filter(symbol => !collected.has(symbol));
+        } catch (error) {
+          if (error?.code === 'CLIENT_ABORT' || error?.code === 'DEADLINE') throw error;
+          // One retry on the second Yahoo host is deliberate. Per-symbol
+          // retries would create an N+1 burst on Render's shared IP.
+        }
+        if (remaining.length && this._contextActive(context)) await this.pause(250);
+      }
+    }
+    const chartFallbackSymbols = unique.filter(symbol => !collected.has(symbol));
+    await mapLimit(
+      chartFallbackSymbols,
+      this.technicalChartConcurrency,
+      async symbol => {
+        for (const host of ['query1', 'query2']) {
+          if (!this._contextActive(context)) break;
+          const params = new URLSearchParams({
+            range: '5y',
+            interval: '1d',
+            events: 'div,splits',
+            includePrePost: 'false'
+          });
+          try {
+            const payload = await this._requestJson(
+              `yahoo-technical-chart-${host}`,
+              `https://${host}.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?${params}`,
+              { timeoutMs: this.technicalTimeoutMs, context }
+            );
+            const history = parseYahooTechnicalChartHistory(payload, symbol, this.now());
+            if (history) {
+              collected.set(symbol, history);
+              this._setTechnicalHistoryCache(symbol, history);
+              return;
+            }
+          } catch (error) {
+            if (error?.code === 'CLIENT_ABORT' || error?.code === 'DEADLINE') throw error;
+          }
+          if (host === 'query1' && this._contextActive(context)) await this.pause(100);
+        }
+      }
+    );
+    return collected;
+  }
+
+  async _getTechnicalHistories(symbols, context, options = {}) {
+    const unique = [...new Set(symbols.map(normalizeSymbol).filter(Boolean))];
+    const forceRefresh = options.forceRefresh === true;
+    const initiallyFresh = new Set();
+    if (!forceRefresh) {
+      for (const symbol of unique) {
+        if (this._technicalHistoryCacheLookup(symbol, this.technicalTtlMs)) {
+          initiallyFresh.add(symbol);
+        }
+      }
+    }
+
+    let activeSatisfiedForce = false;
+    if (this.technicalHistoryInFlight) {
+      const active = this.technicalHistoryInFlight;
+      try {
+        await this._raceContext(active.promise, context);
+        activeSatisfiedForce = forceRefresh && active.force === true &&
+          unique.every(symbol => active.symbols.has(symbol));
+      } catch (error) {
+        if (error?.code === 'CLIENT_ABORT') throw error;
+      }
+    }
+
+    let missing = unique.filter(symbol => {
+      if (forceRefresh && !activeSatisfiedForce) return true;
+      return !this._technicalHistoryCacheLookup(symbol, this.technicalTtlMs);
+    });
+    const refreshed = new Set();
+    if (missing.length && this._contextActive(context)) {
+      const sharedContext = {
+        deadlineAt: this.clock() + this.technicalDeadlineMs,
+        signal: null
+      };
+      const active = {
+        promise: null,
+        symbols: new Set(missing),
+        force: forceRefresh
+      };
+      const task = this.yahooQueue.then(() => this._yahooTechnicalHistory(missing, sharedContext));
+      this.yahooQueue = task.then(() => undefined, () => undefined);
+      active.promise = task.finally(() => {
+        if (this.technicalHistoryInFlight === active) this.technicalHistoryInFlight = null;
+      });
+      this.technicalHistoryInFlight = active;
+      try {
+        const loaded = await this._raceContext(active.promise, context);
+        for (const symbol of loaded.keys()) refreshed.add(symbol);
+      } catch (error) {
+        if (error?.code === 'CLIENT_ABORT') throw error;
+      }
+    }
+
+    const histories = new Map();
+    for (const symbol of unique) {
+      const fresh = this._technicalHistoryCacheLookup(symbol, this.technicalTtlMs);
+      if (fresh) {
+        histories.set(symbol, {
+          ...fresh.value,
+          cacheState: refreshed.has(symbol) || (forceRefresh && !initiallyFresh.has(symbol))
+            ? 'refreshed'
+            : 'hit',
+          cacheAgeMs: fresh.ageMs,
+          stale: false
+        });
+        continue;
+      }
+      const stale = this._technicalHistoryCacheLookup(symbol, this.technicalStaleMs);
+      if (stale) {
+        histories.set(symbol, {
+          ...stale.value,
+          cacheState: 'stale-fallback',
+          cacheAgeMs: stale.ageMs,
+          stale: true
+        });
+      }
+    }
+    return histories;
   }
 
   async _refreshThemes(context) {
@@ -2349,7 +4047,11 @@ class MarketDataService {
   async getThemeIntelligence(options = {}) {
     const startedAt = this.clock();
     const currentCache = this.intelligenceCache;
-    const freshTtl = currentCache?.value?.status === 'ok'
+    const cachedMeta = currentCache?.value?.meta;
+    const cacheHasCompleteScoringUniverse = currentCache?.value?.status !== 'unavailable' &&
+      currentCache?.value?.rrg?.status !== 'unavailable' && cachedMeta?.observationStale !== true &&
+      Number(cachedMeta?.scoringReturnedSymbols) === Number(cachedMeta?.scoringSymbols);
+    const freshTtl = cacheHasCompleteScoringUniverse
       ? this.intelligenceTtlMs
       : Math.min(this.intelligenceTtlMs, this.intelligencePartialTtlMs);
     const fresh = this._intelligenceCacheLookup(freshTtl);
@@ -2371,7 +4073,8 @@ class MarketDataService {
       work = Promise.resolve()
         .then(() => this._refreshThemeIntelligence(sharedContext))
         .then(payload => {
-          if ((payload.meta?.scoringReturnedSymbols || 0) > 0) {
+          if ((payload.meta?.scoringReturnedSymbols || 0) > 0 && payload.status !== 'unavailable' &&
+              payload.meta?.observationStale !== true) {
             this.intelligenceCache = { savedAt: this.now(), value: payload };
           }
           return payload;
@@ -2399,7 +4102,8 @@ class MarketDataService {
       throw error;
     }
 
-    if ((refreshed.meta?.scoringReturnedSymbols || 0) === 0) {
+    if (refreshed.status === 'unavailable' || refreshed.meta?.observationStale === true ||
+        (refreshed.meta?.scoringReturnedSymbols || 0) === 0) {
       const stale = this._intelligenceCacheLookup(this.intelligenceStaleMs);
       if (stale) {
         return selectIntelligencePayload(stale.value, {
@@ -2415,6 +4119,865 @@ class MarketDataService {
       ageMs: 0,
       durationMs: this.clock() - startedAt
     });
+  }
+
+  _marketRegimeSpyAdjustedCacheLookup() {
+    const entry = this.marketRegimeSpyAdjustedCache;
+    if (!entry) return { hit: false, value: null, ageMs: null };
+    const ageMs = Math.max(0, this.now() - entry.savedAt);
+    if (ageMs > this.marketRegimeSpyAdjustedTtlMs) return { hit: false, value: null, ageMs };
+    return { hit: true, value: entry.value, ageMs };
+  }
+
+  async _loadMarketRegimeSpyAdjustedHistory(context) {
+    const params = new URLSearchParams({
+      range: '2y',
+      interval: '1d',
+      events: 'div,splits',
+      includePrePost: 'false',
+      includeAdjustedClose: 'true'
+    });
+    try {
+      const payload = await this._requestJson(
+        'yahoo-chart-v8-spy',
+        `https://query1.finance.yahoo.com/v8/finance/chart/SPY?${params}`,
+        { timeoutMs: this.themeTimeoutMs, context }
+      );
+      const history = parseYahooChartHistory(payload, 'SPY', this.now());
+      return history?.priceMode === 'adjusted' && history.points.length >= 21
+        ? history
+        : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  async _getMarketRegimeSpyAdjustedHistory(context, options = {}) {
+    const forceRefresh = options.forceRefresh === true;
+    const priorCached = this._marketRegimeSpyAdjustedCacheLookup();
+    const cached = forceRefresh ? { hit: false, value: null } : priorCached;
+    if (cached.hit) return cached.value;
+    let work = this.marketRegimeSpyAdjustedInFlight;
+    if (!work) {
+      const sharedContext = { deadlineAt: this.clock() + this.marketRegimeDeadlineMs, signal: null };
+      work = Promise.resolve()
+        .then(() => this._loadMarketRegimeSpyAdjustedHistory(sharedContext))
+        .then(history => {
+          if (history || !forceRefresh) {
+            this.marketRegimeSpyAdjustedCache = { savedAt: this.now(), value: history || null };
+          }
+          return history || null;
+        })
+        .finally(() => {
+          if (this.marketRegimeSpyAdjustedInFlight === work) this.marketRegimeSpyAdjustedInFlight = null;
+        });
+      this.marketRegimeSpyAdjustedInFlight = work;
+    }
+    const refreshed = await this._raceContext(work, context);
+    if (refreshed || !forceRefresh || !priorCached.hit || !priorCached.value) return refreshed;
+    const requiredSessionDate = String(options.requiredSessionDate || '');
+    const cachedSessionDate = String(priorCached.value?.points?.at(-1)?.sessionDate || '');
+    if (!requiredSessionDate || cachedSessionDate !== requiredSessionDate) return null;
+    return {
+      ...priorCached.value,
+      refreshFallback: true,
+      refreshFallbackCacheAgeMs: priorCached.ageMs
+    };
+  }
+
+  async _refreshMarketRegime(context, options = {}) {
+    const forceRefresh = options.forceRefresh === true;
+    const task = this.yahooQueue.then(async () => {
+      const histories = new Map(await this._yahooThemeHistory(
+        MARKET_REGIME_SYMBOLS,
+        context,
+        { bypassCache: forceRefresh }
+      ));
+      const sparkSpy = histories.get('SPY');
+      if (sparkSpy?.priceMode !== 'adjusted') {
+        let adjustedSpy = null;
+        try {
+          adjustedSpy = await this._getMarketRegimeSpyAdjustedHistory(context, {
+            forceRefresh,
+            requiredSessionDate: sparkSpy?.points?.at(-1)?.sessionDate || null
+          });
+        } catch (_) {
+          adjustedSpy = null;
+        }
+        if (adjustedSpy) histories.set('SPY', adjustedSpy);
+      }
+      return histories;
+    });
+    this.yahooQueue = task.then(() => undefined, () => undefined);
+    const histories = await this._raceContext(task, context);
+    return buildMarketRegimePayload(histories, new Date(this.now()).toISOString());
+  }
+
+  _cacheMarketRegimePayload(payload) {
+    const completeObservation = payload.asOf &&
+      payload.meta?.observationStale !== true &&
+      Number(payload.meta?.returnedSymbols) === MARKET_REGIME_SYMBOLS.length &&
+      payload.availability?.history?.complete === true &&
+      payload.availability?.synchronizedConfirmedSession?.current === true;
+    const currentPartialObservation = payload.asOf && (payload.meta?.returnedSymbols || 0) > 0 &&
+      payload.meta?.observationStale !== true;
+    if (completeObservation) {
+      const adjustedFallbackAgeMs = payload.meta?.source?.adjustedSpyRefreshFallback === true
+        ? Number(payload.meta.source.adjustedSpyRefreshFallbackAgeMs)
+        : 0;
+      this.marketRegimeCache = {
+        savedAt: this.now() -
+          (Number.isFinite(adjustedFallbackAgeMs) ? Math.max(0, adjustedFallbackAgeMs) : 0),
+        value: payload
+      };
+      this.marketRegimePartialCache = null;
+    } else if (currentPartialObservation) {
+      this.marketRegimePartialCache = { savedAt: this.now(), value: payload };
+    }
+    return payload;
+  }
+
+  _startMarketRegimeRefresh(forceRefresh) {
+    if (this.marketRegimeInFlight) return this.marketRegimeInFlight;
+    const sharedContext = { deadlineAt: this.clock() + this.marketRegimeDeadlineMs, signal: null };
+    let work;
+    work = Promise.resolve()
+      .then(() => this._refreshMarketRegime(sharedContext, { forceRefresh: forceRefresh === true }))
+      .then(payload => this._cacheMarketRegimePayload(payload))
+      .finally(() => {
+        if (this.marketRegimeInFlight === work) {
+          this.marketRegimeInFlight = null;
+          this.marketRegimeInFlightForce = false;
+        }
+      });
+    this.marketRegimeInFlight = work;
+    this.marketRegimeInFlightForce = forceRefresh === true;
+    return work;
+  }
+
+  _startMarketRegimeForceAfterActive() {
+    const active = this.marketRegimeInFlight;
+    if (!active) return this._startMarketRegimeRefresh(true);
+    if (this.marketRegimeInFlightForce) return active;
+    return active.catch(() => undefined).then(() => this._startMarketRegimeForceAfterActive());
+  }
+
+  _queueMarketRegimeForceRefresh() {
+    if (this.marketRegimeForceQueued) return this.marketRegimeForceQueued;
+    let queued;
+    queued = Promise.resolve()
+      .then(() => this._startMarketRegimeForceAfterActive())
+      .finally(() => {
+        if (this.marketRegimeForceQueued === queued) this.marketRegimeForceQueued = null;
+      });
+    this.marketRegimeForceQueued = queued;
+    return queued;
+  }
+
+  async getMarketRegime(options = {}) {
+    const startedAt = this.clock();
+    const forceRefresh = options.forceRefresh === true;
+    const freshComplete = this._marketRegimeCacheLookup(this.marketRegimeTtlMs, 'complete');
+    const freshPartial = this._marketRegimeCacheLookup(
+      Math.min(this.marketRegimeTtlMs, this.marketRegimePartialTtlMs),
+      'partial'
+    );
+    const fresh = [freshComplete, freshPartial]
+      .filter(Boolean)
+      .sort((left, right) => right.savedAt - left.savedAt)[0] || null;
+    const refreshFloorMs = Math.min(this.marketRegimeTtlMs, this.ttlMs);
+    const forcedWorkPending = forceRefresh && Boolean(
+      this.marketRegimeForceQueued ||
+      (this.marketRegimeInFlight && this.marketRegimeInFlightForce)
+    );
+    const suppressForcedRefresh = forceRefresh && !forcedWorkPending &&
+      fresh && fresh.ageMs <= refreshFloorMs;
+    if (fresh && (!forceRefresh || suppressForcedRefresh)) {
+      return selectMarketRegimePayload(fresh.value, {
+        cache: 'hit',
+        cacheTier: fresh.tier,
+        ageMs: fresh.ageMs,
+        durationMs: this.clock() - startedAt,
+        refreshRequested: forceRefresh,
+        refreshSuppressed: suppressForcedRefresh
+      });
+    }
+
+    let queuedBehindNormal = false;
+    let work;
+    if (forceRefresh) {
+      if (this.marketRegimeForceQueued) {
+        work = this.marketRegimeForceQueued;
+        queuedBehindNormal = true;
+      } else if (this.marketRegimeInFlight) {
+        if (this.marketRegimeInFlightForce) work = this.marketRegimeInFlight;
+        else {
+          work = this._queueMarketRegimeForceRefresh();
+          queuedBehindNormal = true;
+        }
+      } else {
+        work = this._startMarketRegimeRefresh(true);
+      }
+    } else {
+      work = this.marketRegimeInFlight || this._startMarketRegimeRefresh(false);
+    }
+    const callerContext = {
+      deadlineAt: this.clock() + this.marketRegimeDeadlineMs * (queuedBehindNormal ? 2 : 1),
+      signal: options.signal || null
+    };
+
+    let refreshed;
+    try {
+      refreshed = await this._raceContext(work, callerContext);
+    } catch (error) {
+      if (error?.code === 'CLIENT_ABORT') throw error;
+      const stale = [
+        this._marketRegimeCacheLookup(this.marketRegimeStaleMs, 'complete'),
+        this._marketRegimeCacheLookup(this.marketRegimeStaleMs, 'partial')
+      ].filter(Boolean).sort((left, right) => right.savedAt - left.savedAt)[0] || null;
+      if (stale) {
+        return selectMarketRegimePayload(stale.value, {
+          cache: 'stale-fallback',
+          cacheTier: stale.tier,
+          stale: true,
+          ageMs: stale.ageMs,
+          durationMs: this.clock() - startedAt,
+          refreshRequested: forceRefresh
+        });
+      }
+      throw error;
+    }
+
+    const hasCurrentObservation = refreshed.asOf &&
+      (refreshed.meta?.returnedSymbols || 0) > 0 &&
+      refreshed.meta?.observationStale !== true;
+    if (!hasCurrentObservation) {
+      const stale = [
+        this._marketRegimeCacheLookup(this.marketRegimeStaleMs, 'complete'),
+        this._marketRegimeCacheLookup(this.marketRegimeStaleMs, 'partial')
+      ].filter(Boolean).sort((left, right) => right.savedAt - left.savedAt)[0] || null;
+      if (stale) {
+        return selectMarketRegimePayload(stale.value, {
+          cache: 'stale-fallback',
+          cacheTier: stale.tier,
+          stale: true,
+          ageMs: stale.ageMs,
+          durationMs: this.clock() - startedAt,
+          refreshRequested: forceRefresh
+        });
+      }
+    }
+    return selectMarketRegimePayload(refreshed, {
+      cache: 'refreshed',
+      cacheTier: refreshed.availability?.history?.complete === true &&
+        refreshed.availability?.synchronizedConfirmedSession?.current === true
+        ? 'complete'
+        : 'partial',
+      ageMs: 0,
+      durationMs: this.clock() - startedAt,
+      refreshRequested: forceRefresh
+    });
+  }
+
+  _technicalFinnhubCacheLookup(symbol) {
+    const entry = this.technicalFinnhubCache.get(symbol);
+    if (!entry) return null;
+    const ageMs = Math.max(0, this.now() - entry.savedAt);
+    if (ageMs > this.technicalFinnhubCacheTtlMs) return null;
+    this.technicalFinnhubCache.delete(symbol);
+    this.technicalFinnhubCache.set(symbol, entry);
+    return { ageMs, value: cloneJson(entry.value) };
+  }
+
+  _setTechnicalFinnhubCache(symbol, value) {
+    this.technicalFinnhubCache.delete(symbol);
+    this.technicalFinnhubCache.set(symbol, {
+      savedAt: this.now(),
+      value: cloneJson(value)
+    });
+    while (this.technicalFinnhubCache.size > this.technicalCacheMaxEntries) {
+      this.technicalFinnhubCache.delete(this.technicalFinnhubCache.keys().next().value);
+    }
+  }
+
+  async _finnhubTechnicalRequest(provider, path, params, context) {
+    if (!this.finnhubKey || !this._contextActive(context) ||
+        this._circuitUntil(provider) || !this._takeFinnhubBudget()) return null;
+    try {
+      return await this._requestJson(
+        provider,
+        `https://finnhub.io/api/v1/${path}?${new URLSearchParams(params)}`,
+        {
+          timeoutMs: this.finnhubTimeoutMs,
+          context,
+          headers: { 'X-Finnhub-Token': this.finnhubKey }
+        }
+      );
+    } catch (error) {
+      if (error?.code === 'CLIENT_ABORT' || error?.code === 'DEADLINE') throw error;
+      return null;
+    }
+  }
+
+  async _loadFinnhubTechnicalEvidence(symbol, context) {
+    if (!this.finnhubKey) {
+      return {
+        status: 'unavailable',
+        metrics: null,
+        earnings: [],
+        earningsCalendar: [],
+        news: [],
+        earningsDays: null,
+        flags: {
+          goodEarnings: null,
+          guidanceUp: null,
+          revenueGrowth: null,
+          positiveCatalyst: null,
+          negativeMaterial: null
+        },
+        reason: 'FINNHUB_API_KEY is not configured.',
+        provenance: { source: null, pointInTimeHistory: false }
+      };
+    }
+    const now = new Date(this.now());
+    const to = now.toISOString().slice(0, 10);
+    const fromDate = new Date(now);
+    fromDate.setUTCDate(fromDate.getUTCDate() - 30);
+    const calendarToDate = new Date(now);
+    calendarToDate.setUTCDate(calendarToDate.getUTCDate() + 90);
+    const from = fromDate.toISOString().slice(0, 10);
+    const calendarTo = calendarToDate.toISOString().slice(0, 10);
+    const [newsPayload, earningsPayload, calendarPayload, metricsPayload] = await Promise.all([
+      this._finnhubTechnicalRequest(
+        'finnhub-company-news',
+        'company-news',
+        { symbol, from, to },
+        context
+      ),
+      this._finnhubTechnicalRequest(
+        'finnhub-company-earnings',
+        'stock/earnings',
+        { symbol, limit: '4' },
+        context
+      ),
+      this._finnhubTechnicalRequest(
+        'finnhub-earnings-calendar',
+        'calendar/earnings',
+        { symbol, from: to, to: calendarTo },
+        context
+      ),
+      this._finnhubTechnicalRequest(
+        'finnhub-basic-metrics',
+        'stock/metric',
+        { symbol, metric: 'all' },
+        context
+      )
+    ]);
+    const news = (Array.isArray(newsPayload) ? newsPayload : [])
+      .slice(0, 20)
+      .flatMap(item => {
+        const headline = String(item?.headline || '').trim().slice(0, 500);
+        if (!headline) return [];
+        const datetime = Number(item?.datetime);
+        return [{
+          headline,
+          summary: String(item?.summary || '').trim().slice(0, 1_000),
+          source: String(item?.source || '').slice(0, 120),
+          url: /^https?:\/\//i.test(String(item?.url || '')) ? String(item.url).slice(0, 1_000) : null,
+          at: Number.isFinite(datetime) && datetime > 0
+            ? new Date(datetime * 1000).toISOString()
+            : null,
+          category: String(item?.category || '').slice(0, 80)
+        }];
+      });
+    const earnings = (Array.isArray(earningsPayload) ? earningsPayload : [])
+      .slice(0, 8)
+      .map(item => ({
+        period: String(item?.period || '').slice(0, 10),
+        actual: parseNumber(item?.actual),
+        estimate: parseNumber(item?.estimate),
+        surprise: parseNumber(item?.surprise),
+        surprisePercent: parseNumber(item?.surprisePercent),
+        quarter: parseNumber(item?.quarter),
+        year: parseNumber(item?.year)
+      }));
+    const calendar = (Array.isArray(calendarPayload?.earningsCalendar)
+      ? calendarPayload.earningsCalendar
+      : [])
+      .filter(item => !item?.symbol || normalizeSymbol(item.symbol) === symbol)
+      .slice(0, 10)
+      .map(item => ({
+        date: /^\d{4}-\d{2}-\d{2}$/.test(String(item?.date || '')) ? item.date : null,
+        hour: String(item?.hour || '').slice(0, 20),
+        epsActual: parseNumber(item?.epsActual),
+        epsEstimate: parseNumber(item?.epsEstimate),
+        revenueActual: parseNumber(item?.revenueActual),
+        revenueEstimate: parseNumber(item?.revenueEstimate),
+        quarter: parseNumber(item?.quarter),
+        year: parseNumber(item?.year)
+      }))
+      .filter(item => item.date);
+    const rawMetrics = metricsPayload?.metric && typeof metricsPayload.metric === 'object'
+      ? metricsPayload.metric
+      : null;
+    const pickMetric = (...keys) => {
+      for (const key of keys) {
+        const value = parseNumber(rawMetrics?.[key]);
+        if (value != null) return value;
+      }
+      return null;
+    };
+    const metrics = rawMetrics
+      ? {
+          marketCapitalization: pickMetric('marketCapitalization'),
+          peTtm: pickMetric('peTTM'),
+          psTtm: pickMetric('psTTM'),
+          revenueGrowthTtmYoy: pickMetric('revenueGrowthTTMYoy', 'revenueGrowthQuarterlyYoy'),
+          grossMarginTtm: pickMetric('grossMarginTTM'),
+          netProfitMarginTtm: pickMetric('netProfitMarginTTM'),
+          high52Week: pickMetric('52WeekHigh'),
+          low52Week: pickMetric('52WeekLow')
+        }
+      : null;
+    const latestEarnings = earnings
+      .filter(item => item.period)
+      .sort((left, right) => right.period.localeCompare(left.period))[0] || null;
+    const headlineText = news.map(item => `${item.headline} ${item.summary}`).join(' ').toLowerCase();
+    const guidanceUp = /\b(raise[ds]?|raising|increas(?:e|es|ed|ing))\b.{0,40}\b(guidance|outlook|forecast)\b|\b(guidance|outlook|forecast)\b.{0,40}\b(raise[ds]?|higher|above)\b/i
+      .test(headlineText);
+    const positiveCatalyst = /\b(beat|beats|record|approval|approved|contract win|upgrade|breakthrough|partnership|surge)\b/i
+      .test(headlineText);
+    const negativeMaterial = /\b(miss|misses|cut guidance|lower(?:s|ed)? outlook|downgrade|investigation|lawsuit|recall|default|bankrupt|offering|dilution)\b/i
+      .test(headlineText) ||
+      (latestEarnings?.surprise != null && latestEarnings.surprise < 0);
+    const goodEarnings = latestEarnings
+      ? (
+          latestEarnings.surprise != null
+            ? latestEarnings.surprise > 0
+            : (
+                latestEarnings.actual != null && latestEarnings.estimate != null
+                  ? latestEarnings.actual > latestEarnings.estimate
+                  : null
+              )
+        )
+      : null;
+    const revenueGrowth = metrics?.revenueGrowthTtmYoy == null
+      ? null
+      : metrics.revenueGrowthTtmYoy > 0;
+    const businessDaysUntil = dateValue => {
+      const target = new Date(`${dateValue}T00:00:00Z`);
+      const start = new Date(`${to}T00:00:00Z`);
+      if (!Number.isFinite(target.getTime())) return null;
+      if (target < start) return -1;
+      let days = 0;
+      const cursor = new Date(start);
+      while (cursor < target) {
+        cursor.setUTCDate(cursor.getUTCDate() + 1);
+        if (![0, 6].includes(cursor.getUTCDay())) days += 1;
+      }
+      return days;
+    };
+    const earningsDays = calendar
+      .map(item => businessDaysUntil(item.date))
+      .filter(value => value != null && value >= 0)
+      .sort((left, right) => left - right)[0] ?? null;
+    const availableParts = [newsPayload, earningsPayload, calendarPayload, metricsPayload]
+      .filter(value => value != null).length;
+    const value = {
+      status: availableParts === 4 ? 'ok' : (availableParts ? 'partial' : 'unavailable'),
+      metrics,
+      earnings,
+      earningsCalendar: calendar,
+      news,
+      earningsDays,
+      flags: {
+        goodEarnings,
+        guidanceUp: newsPayload == null ? null : guidanceUp,
+        revenueGrowth,
+        positiveCatalyst: newsPayload == null ? null : positiveCatalyst,
+        negativeMaterial: newsPayload == null && latestEarnings == null ? null : negativeMaterial
+      },
+      reason: availableParts
+        ? 'Current Finnhub evidence; not historical point-in-time evidence.'
+        : 'Finnhub auxiliary endpoints were unavailable.',
+      provenance: {
+        source: 'finnhub',
+        retrievedAt: new Date(this.now()).toISOString(),
+        currentOnly: true,
+        pointInTimeHistory: false,
+        endpoints: {
+          companyNews: newsPayload != null,
+          companyEarnings: earningsPayload != null,
+          earningsCalendar: calendarPayload != null,
+          basicMetrics: metricsPayload != null
+        }
+      }
+    };
+    this._setTechnicalFinnhubCache(symbol, value);
+    return value;
+  }
+
+  async _getFinnhubTechnicalEvidence(symbol, context) {
+    const cached = this._technicalFinnhubCacheLookup(symbol);
+    if (cached) return { ...cached.value, cacheState: 'hit', cacheAgeMs: cached.ageMs };
+    let work = this.technicalFinnhubInFlight.get(symbol);
+    if (!work) {
+      const sharedContext = {
+        deadlineAt: this.clock() + this.technicalDeadlineMs,
+        signal: null
+      };
+      work = Promise.resolve()
+        .then(() => this._loadFinnhubTechnicalEvidence(symbol, sharedContext))
+        .finally(() => {
+          if (this.technicalFinnhubInFlight.get(symbol) === work) {
+            this.technicalFinnhubInFlight.delete(symbol);
+          }
+        });
+      this.technicalFinnhubInFlight.set(symbol, work);
+    }
+    const value = await this._raceContext(work, context);
+    return { ...value, cacheState: 'refreshed', cacheAgeMs: 0 };
+  }
+
+  async _getFinnhubTechnicalEvidenceBatch(symbols, context) {
+    const unique = [...new Set(symbols.map(normalizeSymbol).filter(Boolean))];
+    const out = new Map();
+    if (!this.finnhubKey) {
+      unique.forEach(symbol => out.set(symbol, {
+        status: 'unavailable',
+        metrics: null,
+        earnings: [],
+        earningsCalendar: [],
+        news: [],
+        earningsDays: null,
+        flags: {
+          goodEarnings: null,
+          guidanceUp: null,
+          revenueGrowth: null,
+          positiveCatalyst: null,
+          negativeMaterial: null
+        },
+        reason: 'FINNHUB_API_KEY is not configured.',
+        provenance: { source: null, pointInTimeHistory: false }
+      }));
+      return out;
+    }
+    const selected = unique.slice(0, this.technicalFinnhubMaxSymbols);
+    const rows = await mapLimit(selected, 2, async symbol => {
+      try {
+        return [symbol, await this._getFinnhubTechnicalEvidence(symbol, context)];
+      } catch (error) {
+        if (error?.code === 'CLIENT_ABORT') throw error;
+        return [symbol, {
+          status: 'unavailable',
+          metrics: null,
+          earnings: [],
+          earningsCalendar: [],
+          news: [],
+          earningsDays: null,
+          flags: {
+            goodEarnings: null,
+            guidanceUp: null,
+            revenueGrowth: null,
+            positiveCatalyst: null,
+            negativeMaterial: null
+          },
+          reason: 'Finnhub auxiliary request failed.',
+          provenance: { source: 'finnhub', pointInTimeHistory: false }
+        }];
+      }
+    });
+    rows.forEach(([symbol, value]) => out.set(symbol, value));
+    unique.slice(this.technicalFinnhubMaxSymbols).forEach(symbol => out.set(symbol, {
+      status: 'unavailable',
+      metrics: null,
+      earnings: [],
+      earningsCalendar: [],
+      news: [],
+      earningsDays: null,
+      flags: {
+        goodEarnings: null,
+        guidanceUp: null,
+        revenueGrowth: null,
+        positiveCatalyst: null,
+        negativeMaterial: null
+      },
+      reason: 'Deferred by the low-load Finnhub per-request symbol cap.',
+      provenance: { source: 'finnhub', deferred: true, pointInTimeHistory: false }
+    }));
+    return out;
+  }
+
+  async _technicalIntelligencePayload(options = {}) {
+    if (options.intelligencePayload?.themes) return options.intelligencePayload;
+    const cached = this._intelligenceCacheLookup(this.intelligenceTtlMs);
+    if (cached) {
+      return selectIntelligencePayload(cached.value, {
+        cache: 'hit',
+        ageMs: cached.ageMs,
+        durationMs: 0
+      });
+    }
+    try {
+      return await this.getThemeIntelligence({ signal: options.signal });
+    } catch (_) {
+      return null;
+    }
+  }
+
+  async getBuySignals(options = {}) {
+    const startedAt = this.clock();
+    const symbols = [...new Set((options.symbols || [])
+      .map(normalizeSymbol)
+      .filter(Boolean))]
+      .slice(0, 20);
+    if (!symbols.length) {
+      return {
+        status: 'unavailable',
+        asOf: null,
+        updatedAt: new Date(this.now()).toISOString(),
+        methodology: TECHNICAL_METHOD_VERSION,
+        results: [],
+        execution: { ...SIMULATION_EXECUTION },
+        tradeEligible: false,
+        meta: {
+          status: 'error',
+          durationMs: this.clock() - startedAt,
+          quality: { requested: 0, returned: 0, failed: 0 }
+        }
+      };
+    }
+    const context = {
+      deadlineAt: this.clock() + this.technicalDeadlineMs,
+      signal: options.signal || null
+    };
+    const historiesPromise = this._getTechnicalHistories(symbols, context, {
+      forceRefresh: options.forceRefresh === true
+    });
+    const intelligencePromise = this._technicalIntelligencePayload({
+      signal: options.signal,
+      intelligencePayload: options.intelligencePayload
+    });
+    const evidencePromise = this._getFinnhubTechnicalEvidenceBatch(symbols, context);
+    const [historiesResult, intelligenceResult, evidenceResult] = await Promise.allSettled([
+      historiesPromise,
+      intelligencePromise,
+      evidencePromise
+    ]);
+    if (options.signal?.aborted) throw this._abortError('technical signal request was cancelled', 'CLIENT_ABORT');
+    const histories = historiesResult.status === 'fulfilled' ? historiesResult.value : new Map();
+    const intelligence = intelligenceResult.status === 'fulfilled' ? intelligenceResult.value : null;
+    const evidence = evidenceResult.status === 'fulfilled' ? evidenceResult.value : new Map();
+    const leveragedCatalog = new Set(INTELLIGENCE_THEME_CATALOG.flatMap(entry =>
+      (entry.relatedInstruments || [])
+        .filter(instrument => instrument?.leveraged === true)
+        .map(instrument => normalizeSymbol(instrument.symbol))
+    ));
+    const results = symbols.map(symbol => {
+      const history = histories.get(symbol);
+      if (!history) {
+        return technicalUnavailableResult(
+          symbol,
+          '5年日足OHLCVを取得できませんでした。'
+        );
+      }
+      const existingPosition = (Array.isArray(options.positions) ? options.positions : [])
+        .find(position => normalizeSymbol(position?.symbol || position?.ticker) === symbol);
+      const positionShares = Math.max(0, parseNumber(existingPosition?.shares) ?? 0);
+      const positionPrice = parseNumber(existingPosition?.price);
+      const usdJpy = parseNumber(options.account?.usdJpy);
+      const derivedTickerValueJpy = positionShares > 0 && positionPrice > 0 && usdJpy > 0
+        ? positionShares * positionPrice * usdJpy
+        : null;
+      const account = {
+        ...(options.account || {}),
+        existingTickerValueJpy: derivedTickerValueJpy ??
+          (parseNumber(options.account?.existingTickerValueJpy) ?? 0)
+      };
+      return buildBuySignalResult({
+        symbol,
+        history,
+        theme: bestIntelligenceThemeForSymbol(intelligence, symbol),
+        fundamental: evidence.get(symbol),
+        earningsDays: evidence.get(symbol)?.earningsDays,
+        account,
+        leveragedProduct: leveragedCatalog.has(symbol),
+        nowMs: this.now()
+      });
+    });
+    const available = results.filter(result => result.status !== 'unavailable').length;
+    const stale = results.filter(result => result.status === 'stale').length;
+    const partial = results.filter(result => result.status === 'partial').length;
+    const status = !available ? 'unavailable' : (available === results.length && !stale && !partial ? 'ok' : 'partial');
+    const asOf = results.map(result => result.asOf).filter(Boolean).sort().at(-1) || null;
+    return {
+      status,
+      asOf,
+      updatedAt: new Date(this.now()).toISOString(),
+      methodology: TECHNICAL_METHOD_VERSION,
+      results,
+      execution: { ...SIMULATION_EXECUTION },
+      tradeEligible: false,
+      meta: {
+        status: status === 'unavailable' ? 'error' : status,
+        durationMs: this.clock() - startedAt,
+        requestedSymbols: symbols.length,
+        returnedSymbols: available,
+        range: '5y',
+        interval: '1d',
+        provider: {
+          name: 'Yahoo Finance Chart v8 / Spark probe',
+          official: false,
+          bestEffort: true
+        },
+        optionalEvidence: {
+          finnhubConfigured: Boolean(this.finnhubKey),
+          pointInTimeHistory: false
+        },
+        unverifiedClientContextUsedForScore: false,
+        quality: {
+          requested: symbols.length,
+          returned: available,
+          fresh: results.filter(result => result.status === 'ok').length,
+          stale,
+          failed: results.length - available,
+          unverified: partial,
+          aged: 0,
+          delayed: 0,
+          reference: 0,
+          consensusWarnings: 0
+        }
+      }
+    };
+  }
+
+  async getTechnicalBacktest(options = {}) {
+    const startedAt = this.clock();
+    const symbols = [...new Set((options.symbols || [])
+      .map(normalizeSymbol)
+      .filter(Boolean))]
+      .slice(0, 20);
+    if (!symbols.length) {
+      return {
+        status: 'unavailable',
+        asOf: null,
+        updatedAt: new Date(this.now()).toISOString(),
+        methodology: BACKTEST_METHOD_VERSION,
+        results: [],
+        execution: { ...SIMULATION_EXECUTION },
+        tradeEligible: false,
+        meta: {
+          status: 'error',
+          durationMs: this.clock() - startedAt,
+          quality: { requested: 0, returned: 0, failed: 0 }
+        }
+      };
+    }
+    const requested = [...new Set([...symbols, 'SPY'])];
+    const context = {
+      deadlineAt: this.clock() + this.technicalDeadlineMs,
+      signal: options.signal || null
+    };
+    const histories = await this._getTechnicalHistories(requested, context, {
+      forceRefresh: options.forceRefresh === true
+    });
+    if (options.signal?.aborted) throw this._abortError('technical backtest was cancelled', 'CLIENT_ABORT');
+    const benchmark = histories.get('SPY');
+    const results = symbols.map(symbol => {
+      const history = histories.get(symbol);
+      if (!history) {
+        return technicalUnavailableResult(
+          symbol,
+          '5年日足OHLCVを取得できませんでした。',
+          'backtest'
+        );
+      }
+      let backtest;
+      try {
+        backtest = runTechnicalBacktest(history.bars, {
+          benchmarkBars: benchmark?.bars || [],
+          commissionBps: options.commissionBps,
+          slippageBps: options.slippageBps,
+          priceMode: history.priceMode,
+          signal: options.signal
+        });
+      } catch (error) {
+        if (error?.code === 'CLIENT_ABORT') throw error;
+        backtest = {
+          status: 'unavailable',
+          methodVersion: BACKTEST_METHOD_VERSION,
+          reason: String(error?.message || 'Backtest calculation failed.').slice(0, 300),
+          strategies: []
+        };
+      }
+      const status = backtest.status === 'unavailable'
+        ? 'unavailable'
+        : (history.stale || history.priceMode !== 'adjusted' || !benchmark ? 'partial' : 'ok');
+      const warnings = [];
+      if (!benchmark) warnings.push('SPY欠損のため急落/通常レジームはunknownです。銘柄自身で代用しません。');
+      if (history.priceMode !== 'adjusted') warnings.push('未調整価格のバックテストは参考値です。');
+      if (history.stale) warnings.push('stale履歴のバックテストです。');
+      return {
+        symbol,
+        ticker: symbol,
+        status,
+        available: backtest.status !== 'unavailable',
+        active: false,
+        asOf: history.bars?.at(-1)?.sessionDate || null,
+        backtest,
+        warnings,
+        quality: {
+          priceMode: history.priceMode,
+          dailyBars: history.bars?.length || 0,
+          source: history.source,
+          cacheState: history.cacheState,
+          cacheAgeMs: history.cacheAgeMs,
+          stale: history.stale === true,
+          benchmarkAvailable: Boolean(benchmark)
+        },
+        provenance: {
+          source: history.source,
+          benchmark: benchmark ? 'SPY' : null,
+          range: '5y',
+          interval: '1d',
+          methodVersion: BACKTEST_METHOD_VERSION,
+          pointInTimeMaterial: false
+        },
+        execution: { ...SIMULATION_EXECUTION },
+        tradeEligible: false
+      };
+    });
+    const available = results.filter(result => result.status !== 'unavailable').length;
+    const partial = results.filter(result => result.status === 'partial').length;
+    const status = !available ? 'unavailable' : (available === results.length && !partial ? 'ok' : 'partial');
+    return {
+      status,
+      asOf: results.map(result => result.asOf).filter(Boolean).sort().at(-1) || null,
+      updatedAt: new Date(this.now()).toISOString(),
+      methodology: BACKTEST_METHOD_VERSION,
+      results,
+      execution: { ...SIMULATION_EXECUTION },
+      tradeEligible: false,
+      meta: {
+        status: status === 'unavailable' ? 'error' : status,
+        durationMs: this.clock() - startedAt,
+        requestedSymbols: symbols.length,
+        returnedSymbols: available,
+        benchmarkAvailable: Boolean(benchmark),
+        quality: {
+          requested: symbols.length,
+          returned: available,
+          fresh: results.filter(result => result.status === 'ok').length,
+          stale: results.filter(result => result.quality?.stale).length,
+          failed: results.length - available,
+          unverified: partial,
+          aged: 0,
+          delayed: 0,
+          reference: 0,
+          consensusWarnings: 0
+        }
+      }
+    };
   }
 
   async finnhubQuote(symbol, context) {
@@ -2844,9 +5407,26 @@ class MarketDataService {
     const intelligenceCacheAgeMs = this.intelligenceCache
       ? Math.max(0, this.now() - this.intelligenceCache.savedAt)
       : null;
-    const intelligenceFreshTtlMs = this.intelligenceCache?.value?.status === 'ok'
+    const intelligenceFreshTtlMs = this.intelligenceCache?.value?.status === 'ok' && this.intelligenceCache?.value?.rrg?.status !== 'unavailable'
       ? this.intelligenceTtlMs
       : Math.min(this.intelligenceTtlMs, this.intelligencePartialTtlMs);
+    const marketRegimeCacheAgeMs = this.marketRegimeCache
+      ? Math.max(0, this.now() - this.marketRegimeCache.savedAt)
+      : null;
+    const marketRegimePartialCacheAgeMs = this.marketRegimePartialCache
+      ? Math.max(0, this.now() - this.marketRegimePartialCache.savedAt)
+      : null;
+    const completeRegimeCacheState = this.marketRegimeCache
+      ? (marketRegimeCacheAgeMs <= this.marketRegimeTtlMs ? 'fresh' : 'stale-available')
+      : 'empty';
+    const partialRegimeCacheState = this.marketRegimePartialCache
+      ? (marketRegimePartialCacheAgeMs <= Math.min(this.marketRegimeTtlMs, this.marketRegimePartialTtlMs)
+          ? 'fresh'
+          : 'stale-available')
+      : 'empty';
+    const spyAdjustedCacheAgeMs = this.marketRegimeSpyAdjustedCache
+      ? Math.max(0, this.now() - this.marketRegimeSpyAdjustedCache.savedAt)
+      : null;
     return {
       cacheEntries: this.cache.size,
       cache: {
@@ -2896,6 +5476,45 @@ class MarketDataService {
         actualFundFlow: false,
         volumeUsed: false
       },
+      marketRegime: {
+        symbols: [...MARKET_REGIME_SYMBOLS],
+        methodVersion: MARKET_REGIME_METHOD_VERSION,
+        cacheState: partialRegimeCacheState === 'fresh'
+          ? 'partial-fresh'
+          : (completeRegimeCacheState === 'fresh'
+              ? 'complete-fresh'
+              : (completeRegimeCacheState === 'stale-available' || partialRegimeCacheState === 'stale-available'
+                  ? 'stale-available'
+                  : 'empty')),
+        cacheAgeMs: [marketRegimeCacheAgeMs, marketRegimePartialCacheAgeMs]
+          .filter(Number.isFinite)
+          .sort((left, right) => left - right)[0] ?? null,
+        completeCache: {
+          state: completeRegimeCacheState,
+          ageMs: marketRegimeCacheAgeMs
+        },
+        partialCache: {
+          state: partialRegimeCacheState,
+          ageMs: marketRegimePartialCacheAgeMs
+        },
+        spyAdjustedHistory: {
+          cacheState: this.marketRegimeSpyAdjustedCache
+            ? (spyAdjustedCacheAgeMs <= this.marketRegimeSpyAdjustedTtlMs ? 'fresh' : 'expired')
+            : 'empty',
+          cacheAgeMs: spyAdjustedCacheAgeMs,
+          available: Boolean(this.marketRegimeSpyAdjustedCache?.value),
+          inFlight: Boolean(this.marketRegimeSpyAdjustedInFlight),
+          ttlMs: this.marketRegimeSpyAdjustedTtlMs,
+          source: 'yahoo-chart-v8-adjusted'
+        },
+        inFlight: Boolean(this.marketRegimeInFlight),
+        ttlMs: this.marketRegimeTtlMs,
+        partialTtlMs: this.marketRegimePartialTtlMs,
+        staleTtlMs: this.marketRegimeStaleMs,
+        deadlineMs: this.marketRegimeDeadlineMs,
+        actualFundFlow: false,
+        tradingSignal: false
+      },
       finnhubBudget: {
         used: this.finnhubBudget.count,
         limit: this.finnhubCallsPerMinute,
@@ -2920,25 +5539,46 @@ module.exports = {
   INTELLIGENCE_CATALOG_VERSION,
   INTELLIGENCE_STRUCTURAL_EDGES,
   INTELLIGENCE_THEME_CATALOG,
+  MARKET_REGIME_HORIZONS,
+  MARKET_REGIME_MAX_OBSERVATION_AGE_MS,
+  MARKET_REGIME_METHOD_VERSION,
+  MARKET_REGIME_SYMBOLS,
+  RRG_LONG_SESSIONS,
+  RRG_METHOD_VERSION,
+  RRG_SHORT_SESSIONS,
+  RRG_TRAIL_SESSIONS,
+  RRG_TRAIL_POINTS,
   THEME_CATALOG,
   THEME_CATALOG_VERSION,
   THEME_PERIODS,
   applyValidatedEdgeAssociations,
   buildIntelligencePayload,
+  buildMarketRegimePayload,
+  buildRrgData,
+  buildThemeRrg,
   buildThemePayload,
   calculatePeriodPerformance,
+  chronologicalAssociationWindows,
   compareProviders,
   inferMarketState,
   mapLimit,
+  marketRegimeClassification,
   normalizeCloses,
   normalizeHistoryPoints,
+  normalizeTechnicalBars,
   normalizeSymbol,
   parseNumber,
+  parseYahooChartHistory,
   parseYahooSpark,
+  parseYahooTechnicalChartHistory,
+  parseYahooTechnicalHistory,
   parseYahooThemeHistory,
   previousCloseFromSeries,
   quoteFromChart,
   quoteFreshness,
+  rrgQuadrant,
+  scoreMarketRegime,
+  selectMarketRegimePayload,
   selectIntelligencePayload,
   timestampAgeMs
 };
