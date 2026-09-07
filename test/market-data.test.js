@@ -5,17 +5,30 @@ const assert = require('node:assert/strict');
 const {
   applyValidatedEdgeAssociations,
   buildIntelligencePayload,
+  buildMarketRegimePayload,
+  buildRrgData,
+  chronologicalAssociationWindows,
   compareProviders,
   calculatePeriodPerformance,
   INTELLIGENCE_CATEGORIES,
   INTELLIGENCE_STRUCTURAL_EDGES,
   INTELLIGENCE_THEME_CATALOG,
+  MARKET_REGIME_MAX_OBSERVATION_AGE_MS,
+  RRG_LONG_SESSIONS,
+  RRG_SHORT_SESSIONS,
+  RRG_TRAIL_POINTS,
   MarketDataService,
   normalizeHistoryPoints,
+  normalizeTechnicalBars,
   parseYahooSpark,
+  parseYahooTechnicalChartHistory,
+  parseYahooTechnicalHistory,
   parseYahooThemeHistory,
+  parseYahooChartHistory,
   quoteFromChart,
   quoteFreshness,
+  rrgQuadrant,
+  scoreMarketRegime,
   THEME_CATALOG
 } = require('../market-data');
 
@@ -879,6 +892,230 @@ test('theme refresh failure preserves and explicitly labels stale cached data', 
   assert.ok(fallback.themes[0].leaders[0].price > 0);
 });
 
+function rrgFixture({ sessions = 110, themeDailyLog = 0.012, spyDailyLog = 0.001, priceMode = 'raw' } = {}) {
+  const dates = [];
+  const cursor = new Date('2025-01-02T21:00:00Z');
+  while (dates.length < sessions) {
+    const day = cursor.getUTCDay();
+    if (day !== 0 && day !== 6) dates.push(cursor.toISOString().slice(0, 10));
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+  const symbols = [...new Set(['SPY', ...INTELLIGENCE_THEME_CATALOG.flatMap(theme => theme.relatedTickers)])];
+  const histories = new Map(symbols.map(symbol => {
+    const rate = symbol === 'SPY' ? spyDailyLog : themeDailyLog;
+    const points = dates.map((date, index) => {
+      const close = 100 * Math.exp(rate * index);
+      return { timestamp: Date.parse(`${date}T21:00:00Z`) / 1000, at: `${date}T21:00:00.000Z`, sessionDate: date, close, rawClose: close, priceMode };
+    });
+    return [symbol, { points, currency: 'USD', exchange: 'TEST', priceMode, excludedOpenSession: false }];
+  }));
+  return { dates, histories };
+}
+
+test('RRG-style coordinates use exact SPY sessions, untrimmed log returns and fixed quadrant boundaries', () => {
+  const { dates, histories } = rrgFixture();
+  const rrg = buildRrgData(histories, dates);
+  const gpu = rrg.byTheme.get('gpu');
+  assert.equal(rrg.dates.length, RRG_TRAIL_POINTS);
+  assert.equal(gpu.trail.length, RRG_TRAIL_POINTS);
+  assert.equal(gpu.longPeriodSessions, RRG_LONG_SESSIONS);
+  assert.equal(gpu.shortPeriodSessions, RRG_SHORT_SESSIONS);
+  assert.ok(Math.abs(gpu.longRelativePct - 69.3) < 1e-8);
+  assert.ok(Math.abs(gpu.shortRelativePct - 5.5) < 1e-8);
+  assert.ok(gpu.longRelativePct > 50, 'RRG values must not inherit the score model ±50% clipping');
+  assert.equal(gpu.quadrant, 'leader');
+  assert.equal(gpu.priceMode, 'raw-close-fallback');
+  assert.equal(gpu.dividendAdjusted, false);
+  assert.match(gpu.qualityWarning, /dividends are excluded/);
+  assert.deepEqual([
+    rrgQuadrant(1, 1),
+    rrgQuadrant(1, -1),
+    rrgQuadrant(-1, 1),
+    rrgQuadrant(-1, -1),
+    rrgQuadrant(0, 0)
+  ], ['leader', 'weakening', 'rebound', 'lagging', 'leader']);
+});
+
+test('RRG trails share SPY dates, never fill missing endpoints and do not look ahead', () => {
+  const { dates, histories } = rrgFixture({ themeDailyLog: 0.004 });
+  const before = buildRrgData(histories, dates).byTheme.get('gpu');
+  const currentDate = dates.at(-1);
+  histories.get('NVDA').points = histories.get('NVDA').points.filter(point => point.sessionDate !== currentDate);
+  const missing = buildRrgData(histories, dates).byTheme.get('gpu');
+  assert.equal(missing.trail.at(-1).status, 'unavailable');
+  assert.equal(missing.trail.at(-1).longRelativePct, null);
+  assert.equal(missing.trail.at(-1).coveragePct, 75);
+  assert.deepEqual(missing.trail.map(point => point.date), dates.slice(-RRG_TRAIL_POINTS));
+
+  const futureChanged = rrgFixture({ themeDailyLog: 0.004 });
+  futureChanged.histories.get('NVDA').points.at(-1).close *= 9;
+  futureChanged.histories.get('NVDA').points.at(-1).rawClose *= 9;
+  const after = buildRrgData(futureChanged.histories, futureChanged.dates).byTheme.get('gpu');
+  assert.deepEqual(after.trail.slice(0, -1), before.trail.slice(0, -1));
+  assert.notEqual(after.trail.at(-1).longRelativePct, before.trail.at(-1).longRelativePct);
+});
+
+test('RRG contract labels raw-close limits and fingerprints historical trail revisions', () => {
+  const firstFixture = rrgFixture({ sessions: 300, themeDailyLog: 0.002 });
+  const retrievedAt = `${firstFixture.dates.at(-1)}T23:00:00.000Z`;
+  const first = applyValidatedEdgeAssociations(buildIntelligencePayload(firstFixture.histories, retrievedAt));
+  assert.equal(first.rrg.status, 'ok');
+  assert.equal(first.rrg.priceMode, 'raw-close-fallback');
+  assert.equal(first.rrg.dividendAdjusted, false);
+  assert.equal(first.rrg.dates.length, 21);
+  assert.equal(first.rrg.methodology.officialRrg, false);
+  assert.equal(first.rrg.methodology.lookahead, false);
+  assert.equal(first.rrg.methodology.actualFundFlow, false);
+  assert.ok(first.themes.every(theme => theme.rrg.trail.length === 21));
+  assert.ok(first.observedEvidence.some(evidence => evidence.metric === 'rrgLongRelativePct' && evidence.source === 'yahoo-spark-raw-close'));
+
+  const secondFixture = rrgFixture({ sessions: 300, themeDailyLog: 0.002 });
+  secondFixture.histories.get('NVDA').points.at(-10).close *= 1.07;
+  secondFixture.histories.get('NVDA').points.at(-10).rawClose *= 1.07;
+  const second = applyValidatedEdgeAssociations(buildIntelligencePayload(secondFixture.histories, retrievedAt));
+  assert.notEqual(second.dataRevision, first.dataRevision);
+});
+
+test('market-observation age is independent from transport cache age and fail-closes decisions', () => {
+  const fixture = rrgFixture({ sessions: 300, priceMode: 'adjusted' });
+  const payload = applyValidatedEdgeAssociations(buildIntelligencePayload(
+    fixture.histories,
+    '2026-07-19T00:00:00.000Z'
+  ));
+
+  assert.equal(payload.status, 'partial');
+  assert.equal(payload.partial, true);
+  assert.equal(payload.meta.stale, false, 'transport cache is freshly built');
+  assert.equal(payload.meta.observationStale, true);
+  assert.equal(payload.meta.marketObservation.status, 'stale');
+  assert.equal(payload.meta.marketObservation.transportCacheIndependent, true);
+  assert.equal(payload.meta.quality.grade, 'stale');
+  assert.deepEqual(payload.nextCandidates, []);
+  assert.ok(payload.themes.every(theme => theme.eligible === false));
+  assert.ok(payload.themes.every(theme => ['watch', 'avoid'].includes(theme.entry)));
+  assert.ok(payload.edges.every(edge => edge.eligible === false));
+});
+
+test('score features require exact SPY 1/5/20-session endpoints', () => {
+  const fixture = rrgFixture({ sessions: 300, priceMode: 'adjusted' });
+  const missingDate = fixture.dates.at(-1 - RRG_SHORT_SESSIONS);
+  fixture.histories.get('NVDA').points = fixture.histories.get('NVDA').points
+    .filter(point => point.sessionDate !== missingDate);
+  const payload = applyValidatedEdgeAssociations(buildIntelligencePayload(
+    fixture.histories,
+    `${fixture.dates.at(-1)}T23:00:00.000Z`
+  ));
+  const gpu = payload.themes.find(theme => theme.id === 'gpu');
+
+  assert.equal(payload.status, 'partial');
+  assert.equal(gpu.coverage.pct, 75);
+  assert.equal(gpu.score, null);
+  assert.equal(gpu.eligible, false);
+  assert.equal(gpu.rrg.trail.at(-1).coveragePct, 75);
+  assert.equal(gpu.rrg.trail.at(-1).status, 'unavailable');
+});
+
+test('a later close can change only its own score frame and never rewrites earlier frames', () => {
+  const beforeFixture = rrgFixture({ sessions: 300, priceMode: 'adjusted', themeDailyLog: 0.002 });
+  const retrievedAt = `${beforeFixture.dates.at(-1)}T23:00:00.000Z`;
+  const before = applyValidatedEdgeAssociations(buildIntelligencePayload(beforeFixture.histories, retrievedAt));
+  const afterFixture = rrgFixture({ sessions: 300, priceMode: 'adjusted', themeDailyLog: 0.002 });
+  afterFixture.histories.get('NVDA').points.at(-1).close *= 3;
+  const after = applyValidatedEdgeAssociations(buildIntelligencePayload(afterFixture.histories, retrievedAt));
+
+  for (const theme of before.themes) {
+    const changed = after.themes.find(candidate => candidate.id === theme.id);
+    assert.deepEqual(changed.history.slice(0, -1), theme.history.slice(0, -1));
+  }
+  assert.notDeepEqual(
+    after.themes.find(theme => theme.id === 'gpu').history.at(-1),
+    before.themes.find(theme => theme.id === 'gpu').history.at(-1)
+  );
+});
+
+test('global status aggregates a partial RRG component even when current scores are complete', () => {
+  const fixture = rrgFixture({ sessions: 300, priceMode: 'adjusted' });
+  const historicalGap = fixture.dates.at(-10);
+  fixture.histories.get('NVDA').points = fixture.histories.get('NVDA').points
+    .filter(point => point.sessionDate !== historicalGap);
+  const payload = applyValidatedEdgeAssociations(buildIntelligencePayload(
+    fixture.histories,
+    `${fixture.dates.at(-1)}T23:00:00.000Z`
+  ));
+  const gpu = payload.themes.find(theme => theme.id === 'gpu');
+
+  assert.ok(Number.isFinite(gpu.score));
+  assert.equal(payload.rrg.status, 'partial');
+  assert.equal(payload.status, 'partial');
+  assert.equal(payload.partial, true);
+  assert.deepEqual(payload.nextCandidates, []);
+});
+
+test('raw and mixed close histories remain reference-only and cannot create decisions', () => {
+  const rawFixture = rrgFixture({ sessions: 300, priceMode: 'raw' });
+  const rawPayload = applyValidatedEdgeAssociations(buildIntelligencePayload(
+    rawFixture.histories,
+    `${rawFixture.dates.at(-1)}T23:00:00.000Z`
+  ));
+  const rawGpu = rawPayload.themes.find(theme => theme.id === 'gpu');
+  assert.equal(rawPayload.status, 'partial');
+  assert.equal(rawPayload.availability.price.decisionEligible, false);
+  assert.equal(rawGpu.scorePriceMode, 'raw-close-fallback');
+  assert.equal(rawGpu.decisionPriceEligible, false);
+  assert.equal(rawGpu.eligible, false);
+  assert.equal(rawGpu.entry, 'watch');
+  assert.deepEqual(rawPayload.nextCandidates, []);
+  assert.ok(rawPayload.edges.every(edge => edge.eligible === false));
+  assert.equal(rawPayload.rrg.benchmarkPriceMode, 'raw-close-fallback');
+
+  const mixedFixture = rrgFixture({ sessions: 300, priceMode: 'adjusted' });
+  const nvda = mixedFixture.histories.get('NVDA');
+  nvda.priceMode = 'mixed';
+  nvda.points.at(-30).priceMode = 'raw';
+  const mixedPayload = applyValidatedEdgeAssociations(buildIntelligencePayload(
+    mixedFixture.histories,
+    `${mixedFixture.dates.at(-1)}T23:00:00.000Z`
+  ));
+  const mixedGpu = mixedPayload.themes.find(theme => theme.id === 'gpu');
+  assert.equal(mixedGpu.scorePriceMode, 'raw-close-fallback');
+  assert.equal(mixedGpu.decisionPriceEligible, false);
+  assert.equal(mixedGpu.eligible, false);
+});
+
+test('data revision fingerprints full history and final edge results before evidence IDs are assigned', () => {
+  const firstFixture = rrgFixture({ sessions: 300, priceMode: 'adjusted', themeDailyLog: 0.002 });
+  const retrievedAt = `${firstFixture.dates.at(-1)}T23:00:00.000Z`;
+  const first = applyValidatedEdgeAssociations(buildIntelligencePayload(firstFixture.histories, retrievedAt));
+  const sameObservationLater = applyValidatedEdgeAssociations(buildIntelligencePayload(
+    rrgFixture({ sessions: 300, priceMode: 'adjusted', themeDailyLog: 0.002 }).histories,
+    `${firstFixture.dates.at(-1)}T23:30:00.000Z`
+  ));
+  const secondFixture = rrgFixture({ sessions: 300, priceMode: 'adjusted', themeDailyLog: 0.002 });
+  secondFixture.histories.get('NVDA').points.at(-30).close *= 1.25;
+  const second = applyValidatedEdgeAssociations(buildIntelligencePayload(secondFixture.histories, retrievedAt));
+  const firstGpu = first.themes.find(theme => theme.id === 'gpu');
+  const secondGpu = second.themes.find(theme => theme.id === 'gpu');
+
+  assert.notDeepEqual(firstGpu.history, secondGpu.history);
+  assert.equal(first.dataRevision, sameObservationLater.dataRevision);
+  assert.notEqual(first.dataRevision, second.dataRevision);
+  assert.match(first.dataRevision, /^theme-intelligence-v3:/);
+  assert.equal(first.meta.evidenceRevision, first.dataRevision);
+  assert.ok(first.edges.every(edge => edge.revision === first.dataRevision));
+  assert.ok(first.observedEvidence.every(evidence => evidence.revision === first.dataRevision));
+});
+
+test('lag association train and validation windows are chronological and disjoint', () => {
+  const tooShort = Array.from({ length: 159 }, (_, index) => [index, index]);
+  assert.equal(chronologicalAssociationWindows(tooShort), null);
+  const pairs = Array.from({ length: 160 }, (_, index) => [index, index]);
+  const windows = chronologicalAssociationWindows(pairs);
+  assert.equal(windows.train.length, 100);
+  assert.equal(windows.validation.length, 60);
+  assert.equal(windows.train.at(-1)[0], 99);
+  assert.equal(windows.validation[0][0], 100);
+});
+
 function intelligenceHistories() {
   const symbols = [...new Set([
     'SPY',
@@ -916,11 +1153,14 @@ function intelligenceHistories() {
   }));
 }
 
+function freshRetrievedAt(histories, offsetMs = 60 * 60 * 1000) {
+  const latest = histories.get('SPY').points.at(-1);
+  return new Date(Date.parse(latest.at) + offsetMs).toISOString();
+}
+
 test('theme intelligence publishes exactly 50 fixed themes without claiming actual capital flow', () => {
-  const payload = applyValidatedEdgeAssociations(buildIntelligencePayload(
-    intelligenceHistories(),
-    '2026-07-12T00:00:00.000Z'
-  ));
+  const histories = intelligenceHistories();
+  const payload = applyValidatedEdgeAssociations(buildIntelligencePayload(histories, freshRetrievedAt(histories)));
   assert.equal(INTELLIGENCE_THEME_CATALOG.length, 50);
   assert.deepEqual(
     INTELLIGENCE_CATEGORIES.map(category => INTELLIGENCE_THEME_CATALOG.filter(theme => theme.categoryId === category.id).length),
@@ -962,7 +1202,8 @@ test('theme intelligence publishes exactly 50 fixed themes without claiming actu
 });
 
 test('theme intelligence cache strips internals and disables decision outputs on stale fallback', async () => {
-  let now = Date.parse('2026-07-12T00:00:00Z');
+  const histories = intelligenceHistories();
+  let now = Date.parse(freshRetrievedAt(histories));
   let fail = false;
   const service = new MarketDataService({
     fetch: async () => { throw new Error('fetch should be replaced'); },
@@ -971,7 +1212,6 @@ test('theme intelligence cache strips internals and disables decision outputs on
     intelligencePartialTtlMs: 1_000,
     intelligenceStaleMs: 60_000
   });
-  const histories = intelligenceHistories();
   service._yahooThemeHistory = async () => {
     if (fail) throw new Error('upstream down');
     return histories;
@@ -993,5 +1233,1312 @@ test('theme intelligence cache strips internals and disables decision outputs on
   assert.deepEqual(stale.nextCandidates, []);
   assert.ok(stale.themes.every(theme => theme.eligible === false));
   assert.ok(stale.themes.every(theme => ['watch', 'avoid'].includes(theme.entry)));
+  assert.notEqual(stale.dataRevision, first.dataRevision);
+  assert.equal(stale.meta.evidenceRevision, stale.dataRevision);
+  assert.ok(stale.observedEvidence.every(evidence => evidence.revision === stale.dataRevision));
+  assert.ok(stale.edges.every(edge => edge.revision === stale.dataRevision));
   assert.equal(Object.hasOwn(stale, '_internal'), false);
+});
+
+test('a benchmark-only refresh failure cannot overwrite the last usable intelligence cache', async () => {
+  const histories = intelligenceHistories();
+  let now = Date.parse(freshRetrievedAt(histories));
+  let omitBenchmark = false;
+  const service = new MarketDataService({
+    fetch: async () => { throw new Error('fetch should be replaced'); },
+    now: () => now,
+    intelligenceTtlMs: 1_000,
+    intelligencePartialTtlMs: 1_000,
+    intelligenceStaleMs: 60_000
+  });
+  service._yahooThemeHistory = async () => omitBenchmark
+    ? new Map([...histories].filter(([symbol]) => symbol !== 'SPY'))
+    : histories;
+
+  const first = await service.getThemeIntelligence();
+  assert.notEqual(first.status, 'unavailable');
+  now += 2_000;
+  omitBenchmark = true;
+  const fallback = await service.getThemeIntelligence();
+  assert.equal(fallback.meta.cache, 'stale-fallback');
+  assert.equal(fallback.meta.stale, true);
+  assert.notEqual(fallback.status, 'unavailable');
+  assert.deepEqual(fallback.nextCandidates, []);
+});
+
+test('reference-only raw pricing does not force a two-minute full-universe refresh loop', async () => {
+  const histories = intelligenceHistories();
+  for (const history of histories.values()) {
+    history.priceMode = 'raw';
+    for (const point of history.points) point.priceMode = 'raw';
+  }
+  let now = Date.parse(freshRetrievedAt(histories));
+  let calls = 0;
+  const service = new MarketDataService({
+    fetch: async () => { throw new Error('fetch should be replaced'); },
+    now: () => now,
+    intelligenceTtlMs: 60_000,
+    intelligencePartialTtlMs: 1_000
+  });
+  service._yahooThemeHistory = async () => {
+    calls += 1;
+    return histories;
+  };
+
+  const first = await service.getThemeIntelligence();
+  assert.equal(first.status, 'partial');
+  assert.equal(first.availability.price.decisionEligible, false);
+  now += 2_000;
+  const hit = await service.getThemeIntelligence();
+  assert.equal(hit.meta.cache, 'hit');
+  assert.equal(calls, 1);
+});
+
+function marketRegimeFixture(options = {}) {
+  const sessions = options.sessions || 30;
+  const dates = [];
+  const cursor = new Date('2026-06-01T21:00:00.000Z');
+  while (dates.length < sessions) {
+    const day = cursor.getUTCDay();
+    if (day !== 0 && day !== 6) dates.push(cursor.toISOString().slice(0, 10));
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+  const modes = options.modes || {};
+  const builders = {
+    '^VIX': options.vix || (index => 15 + index * 0.01),
+    'CL=F': options.wti || (index => 70 + index * 0.05),
+    SPY: options.spy || (index => 500 + index)
+  };
+  const histories = new Map(Object.entries(builders).map(([symbol, builder]) => {
+    const mode = modes[symbol] || 'adjusted';
+    const points = dates.map((date, index) => {
+      const value = builder(index);
+      return {
+        timestamp: Date.parse(`${date}T21:00:00.000Z`) / 1000,
+        at: `${date}T21:00:00.000Z`,
+        sessionDate: date,
+        close: value,
+        rawClose: value,
+        priceMode: mode === 'adjusted' ? 'adjusted' : 'raw',
+        volume: 1_000_000
+      };
+    });
+    return [symbol, {
+      points,
+      currency: 'USD',
+      exchange: 'TEST',
+      priceMode: mode,
+      excludedOpenSession: false,
+      volumeAvailable: true
+    }];
+  }));
+  return {
+    dates,
+    histories,
+    retrievedAt: `${dates.at(-1)}T23:00:00.000Z`
+  };
+}
+
+function spyAdjustedChartPayload(history) {
+  return {
+    chart: {
+      result: [{
+        meta: {
+          symbol: 'SPY',
+          currency: 'USD',
+          fullExchangeName: 'NYSEArca',
+          regularMarketTime: history.points.at(-1).timestamp,
+          currentTradingPeriod: {}
+        },
+        timestamp: history.points.map(point => point.timestamp),
+        indicators: {
+          quote: [{
+            close: history.points.map(point => point.rawClose),
+            volume: history.points.map(() => 50_000_000)
+          }],
+          adjclose: [{
+            adjclose: history.points.map(point => point.close)
+          }]
+        }
+      }],
+      error: null
+    }
+  };
+}
+
+test('Yahoo Chart v8 parser produces adjusted SPY history with explicit provenance', () => {
+  const fixture = marketRegimeFixture({ modes: { SPY: 'raw' } });
+  const history = parseYahooChartHistory(
+    spyAdjustedChartPayload(fixture.histories.get('SPY')),
+    'SPY',
+    Date.parse(fixture.retrievedAt)
+  );
+  assert.equal(history.priceMode, 'adjusted');
+  assert.equal(history.source, 'yahoo-chart-v8-adjusted');
+  assert.equal(history.points.length, fixture.dates.length);
+  assert.ok(history.points.every(point => point.priceMode === 'adjusted'));
+
+  const openPayload = spyAdjustedChartPayload(fixture.histories.get('SPY'));
+  const openChart = openPayload.chart.result[0];
+  const lastTimestamp = openChart.timestamp.at(-1);
+  openChart.meta.regularMarketTime = lastTimestamp;
+  openChart.meta.currentTradingPeriod = {
+    regular: {
+      start: lastTimestamp - 6 * 60 * 60,
+      end: lastTimestamp + 60 * 60
+    }
+  };
+  const openHistory = parseYahooChartHistory(
+    openPayload,
+    'SPY',
+    (lastTimestamp + 30 * 60) * 1000
+  );
+  assert.equal(openHistory.points.length, fixture.dates.length - 1);
+  assert.equal(openHistory.excludedOpenSession, true);
+});
+
+test('market regime prefers cached adjusted SPY Chart history and keeps trading disconnected', async () => {
+  const fixture = marketRegimeFixture({
+    modes: { '^VIX': 'raw', 'CL=F': 'raw', SPY: 'raw' }
+  });
+  let now = Date.parse(fixture.retrievedAt);
+  let chartCalls = 0;
+  const service = new MarketDataService({
+    fetch: async url => {
+      chartCalls += 1;
+      assert.match(String(url), /\/v8\/finance\/chart\/SPY/);
+      assert.match(String(url), /includeAdjustedClose=true/);
+      return new Response(JSON.stringify(spyAdjustedChartPayload(fixture.histories.get('SPY'))), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    },
+    now: () => now,
+    ttlMs: 1,
+    marketRegimeTtlMs: 1_000,
+    marketRegimeSpyAdjustedTtlMs: 60_000
+  });
+  service._yahooThemeHistory = async () => fixture.histories;
+
+  const first = await service.getMarketRegime();
+  assert.equal(first.status, 'ok');
+  assert.equal(first.regime.assessmentStatus, 'confirmed');
+  assert.equal(first.regime.confidence, 85);
+  assert.equal(first.referenceOnly, false);
+  assert.equal(first.tradeEligible, false);
+  assert.equal(first.regime.tradeEligible, false);
+  assert.equal(first.instruments.spy.priceMode, 'adjusted-close');
+  assert.equal(first.instruments.spy.source, 'yahoo-chart-v8-adjusted');
+  assert.equal(first.meta.source.id, 'yahoo-spark+chart-v8-adjusted');
+  assert.equal(first.meta.source.adjustedSpyUsed, true);
+  assert.equal(chartCalls, 1);
+
+  now += 2_000;
+  const second = await service.getMarketRegime();
+  assert.equal(second.meta.cache, 'refreshed');
+  assert.equal(second.instruments.spy.source, 'yahoo-chart-v8-adjusted');
+  assert.equal(chartCalls, 1, 'adjusted SPY history is fetched at most once inside its TTL');
+
+  now += 2;
+  const forced = await service.getMarketRegime({ forceRefresh: true });
+  assert.equal(forced.meta.cache, 'refreshed');
+  assert.equal(forced.meta.refreshRequested, true);
+  assert.equal(forced.meta.refreshSuppressed, false);
+  assert.equal(forced.instruments.spy.source, 'yahoo-chart-v8-adjusted');
+  assert.equal(chartCalls, 2, 'explicit refresh revalidates adjusted SPY alongside VIX and WTI');
+});
+
+test('forced refresh reuses only a same-session adjusted SPY cache when Chart v8 briefly fails', async () => {
+  const baseline = marketRegimeFixture({
+    vix: () => 15,
+    modes: { '^VIX': 'raw', 'CL=F': 'raw', SPY: 'raw' }
+  });
+  const stressed = marketRegimeFixture({
+    vix: () => 40,
+    modes: { '^VIX': 'raw', 'CL=F': 'raw', SPY: 'raw' }
+  });
+  let now = Date.parse(baseline.retrievedAt);
+  let useStress = false;
+  let chartCalls = 0;
+  const service = new MarketDataService({
+    fetch: async () => {
+      chartCalls += 1;
+      if (chartCalls > 1) return new Response('temporary failure', { status: 503 });
+      return new Response(JSON.stringify(spyAdjustedChartPayload(baseline.histories.get('SPY'))), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    },
+    now: () => now,
+    ttlMs: 1,
+    marketRegimeTtlMs: 60_000,
+    marketRegimeSpyAdjustedTtlMs: 60_000
+  });
+  service._yahooThemeHistory = async () => useStress ? stressed.histories : baseline.histories;
+
+  const first = await service.getMarketRegime();
+  const originalCacheSavedAt = service.marketRegimeCache.savedAt;
+  assert.equal(first.status, 'ok');
+  assert.equal(first.instruments.spy.source, 'yahoo-chart-v8-adjusted');
+  assert.equal(first.meta.source.adjustedSpyRefreshFallback, false);
+
+  now += 2_000;
+  useStress = true;
+  const forced = await service.getMarketRegime({ forceRefresh: true });
+  assert.equal(chartCalls, 2);
+  assert.equal(forced.status, 'ok');
+  assert.equal(forced.instruments.spy.source, 'yahoo-chart-v8-adjusted');
+  assert.equal(forced.meta.source.adjustedSpyRefreshFallback, true);
+  assert.equal(forced.meta.source.adjustedSpyRefreshFallbackAgeMs, 2_000);
+  assert.equal(forced.meta.quality.fresh, 2);
+  assert.equal(forced.meta.quality.closeValid, 3);
+  assert.equal(forced.meta.quality.delayed, 1);
+  assert.match(forced.warnings.join(' '), /同一営業日の正常キャッシュ/);
+  assert.equal(forced.instruments.vix.value, 40, 'new VIX stress is not hidden by the SPY fallback');
+  assert.equal(forced.regime.state, 'danger');
+  assert.notEqual(forced.dataRevision, first.dataRevision);
+  assert.equal(
+    service.marketRegimeCache.savedAt,
+    originalCacheSavedAt,
+    'fallback does not extend the underlying adjusted-SPY cache lifetime'
+  );
+
+  const mismatch = await service._getMarketRegimeSpyAdjustedHistory(
+    { deadlineAt: Date.now() + 1_000, signal: null },
+    { forceRefresh: true, requiredSessionDate: '2099-01-01' }
+  );
+  assert.equal(mismatch, null, 'an adjusted series from an older session is never mixed into a newer refresh');
+  const unknownSession = await service._getMarketRegimeSpyAdjustedHistory(
+    { deadlineAt: Date.now() + 1_000, signal: null },
+    { forceRefresh: true }
+  );
+  assert.equal(unknownSession, null, 'fallback is not used when the refreshed SPY session is unknown');
+});
+
+test('SPY Chart failure safely falls back to Spark raw and negative-caches the failure', async () => {
+  const fixture = marketRegimeFixture({
+    modes: { '^VIX': 'raw', 'CL=F': 'raw', SPY: 'raw' }
+  });
+  let now = Date.parse(fixture.retrievedAt);
+  let chartCalls = 0;
+  const service = new MarketDataService({
+    fetch: async () => {
+      chartCalls += 1;
+      return new Response('upstream unavailable', { status: 503 });
+    },
+    now: () => now,
+    marketRegimeTtlMs: 1_000,
+    marketRegimeSpyAdjustedTtlMs: 60_000
+  });
+  service._yahooThemeHistory = async () => fixture.histories;
+
+  const first = await service.getMarketRegime();
+  assert.equal(first.status, 'partial');
+  assert.equal(first.regime.assessmentStatus, 'reference_only');
+  assert.equal(first.referenceOnly, true);
+  assert.equal(first.instruments.spy.priceMode, 'raw-close-reference');
+  assert.equal(first.instruments.spy.source, 'yahoo-spark');
+  assert.equal(first.meta.source.adjustedSpyUsed, false);
+  assert.equal(first.regime.confidence, 65);
+  assert.equal(chartCalls, 1);
+
+  now += 2_000;
+  const second = await service.getMarketRegime();
+  assert.equal(second.status, 'partial');
+  assert.equal(second.instruments.spy.source, 'yahoo-spark');
+  assert.equal(chartCalls, 1, 'null adjusted-history result is cached to prevent retry loops');
+});
+
+test('market regime synchronizes VIX, WTI and SPY to exact confirmed SPY sessions', () => {
+  const fixture = marketRegimeFixture();
+  const payload = buildMarketRegimePayload(fixture.histories, fixture.retrievedAt);
+  const end = fixture.histories.get('SPY').points.at(-1).close;
+  const baseline5 = fixture.histories.get('SPY').points.at(-6).close;
+
+  assert.equal(payload.status, 'ok');
+  assert.equal(payload.asOf, fixture.dates.at(-1));
+  assert.equal(payload.availability.synchronizedConfirmedSession.lagSessions, 0);
+  assert.equal(payload.indicators.spy.baselines['5d'].date, fixture.dates.at(-6));
+  assert.equal(payload.indicators.spy.changesPct['5d'], +(((end / baseline5) - 1) * 100).toFixed(3));
+  assert.equal(payload.regime.assessmentStatus, 'confirmed');
+  assert.equal(payload.regime.labelJa, payload.regime.label);
+  assert.deepEqual(payload.regime.reasons, payload.regime.rationale);
+  assert.equal(payload.regime.tradeEligible, false);
+  assert.equal(payload.instruments.vix.symbol, '^VIX');
+  assert.equal(payload.instruments.vix.value, payload.indicators.vix.level);
+  assert.equal(payload.instruments.vix.changes['5d'], payload.indicators.vix.changesPct['5d']);
+  assert.equal(payload.instruments.vix.trail.length, 21);
+  assert.ok(payload.instruments.vix.trail.every(point => typeof point.date === 'string'));
+  assert.equal(payload.instruments.vix.priceMode, 'native-index-close');
+  assert.equal(payload.instruments.vix.adjusted, false);
+  assert.equal(payload.instruments.wti.priceMode, 'native-futures-close');
+  assert.equal(payload.instruments.wti.adjusted, false);
+  assert.equal(payload.instruments.wti.continuousContract, true);
+  assert.equal(payload.instruments.wti.rollAdjusted, false);
+  assert.equal(payload.meta.source.id, 'yahoo-spark');
+  assert.equal(payload.meta.source.official, false);
+  assert.equal(payload.meta.source.adjustedSpyUsed, false);
+  assert.ok(payload.regime.confidence <= 85);
+  assert.equal(payload.actualFundFlow, false);
+  assert.equal(payload.tradingSignal, null);
+  assert.equal(payload.methodology.synchronization.includes('no fill'), true);
+});
+
+test('confirmed neutral market regime payload never exposes empty reasons', () => {
+  const fixture = marketRegimeFixture({
+    sessions: 35,
+    vix: index => 18 + index * 0.002,
+    wti: index => 75 + index * 0.03,
+    spy: index => 530 + index * 0.08
+  });
+  const payload = buildMarketRegimePayload(fixture.histories, fixture.retrievedAt);
+
+  assert.equal(payload.status, 'ok');
+  assert.equal(payload.regime.state, 'neutral');
+  assert.equal(payload.regime.score, 50);
+  assert.ok(payload.regime.reasons.length >= 1);
+  assert.ok(payload.regime.reasons.length <= 3);
+  assert.deepEqual(payload.regime.reasons, payload.regime.rationale);
+  assert.ok(payload.regime.reasons.every(reason => typeof reason === 'string' && reason.length > 0));
+});
+
+test('market regime revision follows observations, not retrieval or cache age', () => {
+  const fixture = marketRegimeFixture();
+  const first = buildMarketRegimePayload(fixture.histories, fixture.retrievedAt);
+  const laterRetrieval = buildMarketRegimePayload(
+    fixture.histories,
+    new Date(Date.parse(fixture.retrievedAt) + 60_000).toISOString()
+  );
+  const changedFixture = marketRegimeFixture();
+  changedFixture.histories.get('^VIX').points.at(-1).close += 1;
+  changedFixture.histories.get('^VIX').points.at(-1).rawClose += 1;
+  const changed = buildMarketRegimePayload(changedFixture.histories, changedFixture.retrievedAt);
+  assert.equal(first.dataRevision, laterRetrieval.dataRevision);
+  assert.notEqual(first.dataRevision, changed.dataRevision);
+});
+
+test('danger rules combine high/rising VIX, falling SPY and a confirmed oil shock', () => {
+  const fixture = marketRegimeFixture({
+    vix: index => 15 * Math.pow(1.035, index),
+    wti: index => 60 * Math.pow(1.018, index),
+    spy: index => 500 * Math.pow(0.989, index)
+  });
+  const payload = buildMarketRegimePayload(fixture.histories, fixture.retrievedAt);
+
+  assert.equal(payload.status, 'ok');
+  assert.equal(payload.regime.state, 'danger');
+  assert.ok(payload.regime.score <= 29);
+  assert.ok(payload.regime.contributions.some(entry => entry.factor.startsWith('wti-up-') && entry.points < 0));
+  assert.ok(payload.regime.contributions.some(entry => entry.factor.startsWith('vix-') && entry.points < 0));
+  assert.ok(payload.regime.contributions.some(entry => entry.factor.startsWith('spy-') && entry.points < 0));
+});
+
+test('oil rise alone is neutral and an oil collapse is conditional on cross-market context', () => {
+  const risingOil = marketRegimeFixture({
+    vix: () => 15,
+    wti: index => 60 * Math.pow(1.02, index),
+    spy: index => 500 * Math.pow(1.004, index)
+  });
+  const rise = buildMarketRegimePayload(risingOil.histories, risingOil.retrievedAt);
+  const oilReference = rise.regime.contributions.find(entry => entry.factor === 'wti-up-unconfirmed');
+  assert.equal(oilReference.points, 0);
+  assert.notEqual(rise.regime.state, 'danger');
+
+  const unconfirmedCollapse = marketRegimeFixture({
+    vix: () => 18,
+    wti: index => 100 * Math.pow(0.98, index),
+    spy: () => 500
+  });
+  const unconfirmed = buildMarketRegimePayload(unconfirmedCollapse.histories, unconfirmedCollapse.retrievedAt);
+  assert.ok(unconfirmed.regime.contributions.some(entry =>
+    entry.factor.startsWith('wti-down-unconfirmed-') && entry.points === 0));
+
+  const demandScare = marketRegimeFixture({
+    vix: index => 15 * Math.pow(1.02, index),
+    wti: index => 100 * Math.pow(0.98, index),
+    spy: index => 500 * Math.pow(0.995, index)
+  });
+  const demand = buildMarketRegimePayload(demandScare.histories, demandScare.retrievedAt);
+  assert.ok(demand.regime.contributions.some(entry =>
+    entry.factor.startsWith('wti-down-demand-scare-') && entry.points < 0));
+
+  const disinflation = marketRegimeFixture({
+    vix: index => 25 * Math.pow(0.98, index),
+    wti: index => 100 * Math.pow(0.98, index),
+    spy: index => 500 * Math.pow(1.005, index)
+  });
+  const relief = buildMarketRegimePayload(disinflation.histories, disinflation.retrievedAt);
+  assert.ok(relief.regime.contributions.some(entry =>
+    entry.factor.startsWith('wti-down-disinflation-') && entry.points > 0));
+  assert.match(relief.methodology.oilInterpretation, /sharp fall/i);
+});
+
+test('confirmed shorter-horizon oil demand scare outranks an ambiguous longer collapse', () => {
+  const result = scoreMarketRegime({
+    vix: { level: 18, changesPct: { '1d': 0, '5d': 12, '20d': 0 } },
+    wti: { changesPct: { '1d': 0, '5d': -16, '20d': -30 } },
+    spy: { changesPct: { '1d': 0, '5d': 0, '20d': 0 } }
+  });
+  const oilContributions = result.contributions.filter(entry => entry.factor.startsWith('wti-down-'));
+  assert.equal(oilContributions.length, 1);
+  assert.equal(oilContributions[0].factor, 'wti-down-demand-scare-5d');
+  assert.equal(oilContributions[0].points, -7);
+});
+
+test('missing exact endpoints never use nearest dates or future observations', () => {
+  const fixture = marketRegimeFixture();
+  const missingBaseline = fixture.dates.at(-6);
+  fixture.histories.get('CL=F').points = fixture.histories.get('CL=F').points
+    .filter(point => point.sessionDate !== missingBaseline);
+  const payload = buildMarketRegimePayload(fixture.histories, fixture.retrievedAt);
+
+  assert.equal(payload.indicators.wti.changesPct['5d'], null);
+  assert.equal(payload.indicators.wti.baselines['5d'].exactSession, false);
+  assert.equal(payload.status, 'partial');
+  assert.equal(payload.regime.state, 'unavailable');
+  assert.equal(payload.regime.decisionEligible, false);
+
+  const futureDate = '2026-08-03';
+  fixture.histories.get('SPY').points.push({
+    timestamp: Date.parse(`${futureDate}T21:00:00.000Z`) / 1000,
+    at: `${futureDate}T21:00:00.000Z`,
+    sessionDate: futureDate,
+    close: 9_999,
+    rawClose: 9_999,
+    priceMode: 'adjusted'
+  });
+  const lagged = buildMarketRegimePayload(fixture.histories, `${futureDate}T23:00:00.000Z`);
+  assert.equal(lagged.asOf, fixture.dates.at(-1));
+  assert.equal(lagged.availability.synchronizedConfirmedSession.lagSessions, 1);
+  assert.equal(lagged.status, 'partial');
+  assert.equal(lagged.regime.state, 'unavailable');
+});
+
+test('raw, mixed, stale, nonpositive and extreme observations preserve display data but fail closed', () => {
+  const rawFixture = marketRegimeFixture({
+    modes: { '^VIX': 'raw', 'CL=F': 'raw', SPY: 'raw' }
+  });
+  const raw = buildMarketRegimePayload(rawFixture.histories, rawFixture.retrievedAt);
+  assert.equal(raw.status, 'partial');
+  assert.notEqual(raw.regime.state, 'unavailable');
+  assert.equal(raw.regime.referenceOnly, true);
+  assert.equal(raw.regime.watchOnly, true);
+  assert.ok(Number.isFinite(raw.regime.optimismScore));
+  assert.equal(raw.regime.riskScore, 100 - raw.regime.optimismScore);
+  assert.equal(raw.regime.decisionEligible, false);
+  assert.equal(raw.availability.adjustedClose.available, false);
+  assert.equal(raw.tradingSignal, null);
+
+  const mixedFixture = marketRegimeFixture({ modes: { 'CL=F': 'mixed' } });
+  const mixed = buildMarketRegimePayload(mixedFixture.histories, mixedFixture.retrievedAt);
+  assert.equal(mixed.status, 'partial');
+  assert.notEqual(mixed.regime.state, 'unavailable');
+  assert.equal(mixed.regime.referenceOnly, true);
+  assert.equal(mixed.availability.adjustedClose.priceMode, 'mixed-native-close-reference');
+
+  const staleFixture = marketRegimeFixture();
+  const staleAt = new Date(Date.parse(staleFixture.retrievedAt) + 8 * 24 * 60 * 60 * 1000).toISOString();
+  const stale = buildMarketRegimePayload(staleFixture.histories, staleAt);
+  assert.equal(stale.status, 'partial');
+  assert.equal(stale.meta.observationStale, true);
+  assert.equal(stale.regime.state, 'unavailable');
+  assert.equal(stale.regime.score, null);
+
+  const negativeFixture = marketRegimeFixture();
+  const negativeLast = negativeFixture.histories.get('CL=F').points.at(-1);
+  negativeLast.close = -37.63;
+  negativeLast.rawClose = -37.63;
+  const negative = buildMarketRegimePayload(negativeFixture.histories, negativeFixture.retrievedAt);
+  assert.equal(negative.instruments.wti.value, -37.63);
+  assert.equal(negative.instruments.wti.returnUndefinedReason, 'nonpositive-futures-level');
+  assert.equal(negative.instruments.wti.changes['1d'], null);
+  assert.equal(negative.regime.state, 'unavailable');
+
+  for (const invalidLevel of [5_000]) {
+    const invalidFixture = marketRegimeFixture();
+    const last = invalidFixture.histories.get('CL=F').points.at(-1);
+    last.close = invalidLevel;
+    last.rawClose = invalidLevel;
+    const invalid = buildMarketRegimePayload(invalidFixture.histories, invalidFixture.retrievedAt);
+    assert.equal(invalid.indicators.wti.level, null);
+    assert.equal(invalid.indicators.wti.invalidReason, 'implausible-level');
+    assert.equal(invalid.status, 'partial');
+    assert.equal(invalid.regime.state, 'unavailable');
+  }
+});
+
+test('market regime freshness matches the 96-hour UI contract across weekends', () => {
+  const fixture = marketRegimeFixture();
+  const observedAt = Date.parse(fixture.histories.get('SPY').points.at(-1).at);
+  const withinWeekendWindow = buildMarketRegimePayload(
+    fixture.histories,
+    new Date(observedAt + MARKET_REGIME_MAX_OBSERVATION_AGE_MS - 60_000).toISOString()
+  );
+  assert.equal(withinWeekendWindow.meta.observationStale, false);
+  assert.notEqual(withinWeekendWindow.regime.state, 'unavailable');
+  assert.equal(withinWeekendWindow.meta.maximumObservationAgeMs, 96 * 60 * 60 * 1000);
+
+  const stoppedForFiveDays = buildMarketRegimePayload(
+    fixture.histories,
+    new Date(observedAt + MARKET_REGIME_MAX_OBSERVATION_AGE_MS + 60_000).toISOString()
+  );
+  assert.equal(stoppedForFiveDays.meta.observationStale, true);
+  assert.equal(stoppedForFiveDays.regime.state, 'unavailable');
+  assert.equal(stoppedForFiveDays.regime.score, null);
+});
+
+test('market regime service caches synchronized observations and fail-closes stale fallback', async () => {
+  const fixture = marketRegimeFixture();
+  let now = Date.parse(fixture.retrievedAt);
+  let fail = false;
+  let calls = 0;
+  const service = new MarketDataService({
+    fetch: async () => { throw new Error('fetch should be replaced'); },
+    now: () => now,
+    marketRegimeTtlMs: 1_000,
+    marketRegimePartialTtlMs: 500,
+    marketRegimeStaleMs: 60_000
+  });
+  service._yahooThemeHistory = async () => {
+    calls += 1;
+    if (fail) throw new Error('upstream down');
+    return fixture.histories;
+  };
+
+  const first = await service.getMarketRegime();
+  const hit = await service.getMarketRegime();
+  assert.equal(first.meta.cache, 'refreshed');
+  assert.equal(hit.meta.cache, 'hit');
+  assert.equal(calls, 1);
+
+  now += 2_000;
+  fail = true;
+  const stale = await service.getMarketRegime();
+  assert.equal(stale.meta.cache, 'stale-fallback');
+  assert.equal(stale.meta.stale, true);
+  assert.equal(stale.status, 'partial');
+  assert.equal(stale.regime.state, 'unavailable');
+  assert.equal(stale.regime.score, null);
+  assert.equal(stale.regime.decisionEligible, false);
+  assert.equal(stale.tradingSignal, null);
+});
+
+test('explicit market regime refresh bypasses the fifteen-minute history cache after the quote refresh floor', async () => {
+  const fixture = marketRegimeFixture();
+  let now = Date.parse(fixture.retrievedAt);
+  let calls = 0;
+  const bypassFlags = [];
+  const service = new MarketDataService({
+    fetch: async () => { throw new Error('fetch should be replaced'); },
+    now: () => now,
+    ttlMs: 45_000,
+    marketRegimeTtlMs: 15 * 60_000
+  });
+  service._yahooThemeHistory = async (_symbols, _context, options = {}) => {
+    calls += 1;
+    bypassFlags.push(options.bypassCache === true);
+    return fixture.histories;
+  };
+
+  const first = await service.getMarketRegime();
+  const normalHit = await service.getMarketRegime();
+  assert.equal(first.meta.cache, 'refreshed');
+  assert.equal(normalHit.meta.cache, 'hit');
+  assert.equal(calls, 1);
+  assert.deepEqual(bypassFlags, [false]);
+
+  const immediate = await service.getMarketRegime({ forceRefresh: true });
+  assert.equal(immediate.meta.cache, 'hit');
+  assert.equal(immediate.meta.refreshRequested, true);
+  assert.equal(immediate.meta.refreshSuppressed, true);
+  assert.equal(calls, 1, 'manual refresh shares the same short anti-spam floor as FX quotes');
+
+  now += 45_001;
+  const forced = await service.getMarketRegime({ forceRefresh: true });
+  assert.equal(forced.meta.cache, 'refreshed');
+  assert.equal(forced.meta.refreshRequested, true);
+  assert.equal(forced.meta.refreshSuppressed, false);
+  assert.equal(calls, 2);
+  assert.deepEqual(bypassFlags, [false, true]);
+  assert.equal(forced.dataRevision, first.dataRevision, 'retrieval alone does not fabricate a new observation revision');
+  assert.notEqual(forced.updatedAt, first.updatedAt);
+});
+
+test('incomplete market regime history uses the short partial cache without a request loop', async () => {
+  const fixture = marketRegimeFixture();
+  const missingDate = fixture.dates.at(-6);
+  fixture.histories.get('CL=F').points = fixture.histories.get('CL=F').points
+    .filter(point => point.sessionDate !== missingDate);
+  let now = Date.parse(fixture.retrievedAt);
+  let calls = 0;
+  const service = new MarketDataService({
+    fetch: async () => { throw new Error('fetch should be replaced'); },
+    now: () => now,
+    marketRegimeTtlMs: 60_000,
+    marketRegimePartialTtlMs: 500
+  });
+  service._yahooThemeHistory = async () => {
+    calls += 1;
+    return fixture.histories;
+  };
+
+  const first = await service.getMarketRegime();
+  const hit = await service.getMarketRegime();
+  assert.equal(first.status, 'partial');
+  assert.equal(first.meta.cache, 'refreshed');
+  assert.equal(hit.meta.cache, 'hit');
+  assert.equal(calls, 1);
+
+  now += 600;
+  const refreshed = await service.getMarketRegime();
+  assert.equal(refreshed.meta.cache, 'refreshed');
+  assert.equal(calls, 2);
+});
+
+test('fresh high-VIX partial observation outranks an expired complete cache', async () => {
+  const completeFixture = marketRegimeFixture({ vix: () => 15 });
+  const dangerFixture = marketRegimeFixture({ vix: () => 40 });
+  dangerFixture.histories.delete('CL=F');
+  let now = Date.parse(completeFixture.retrievedAt);
+  let useDangerPartial = false;
+  let calls = 0;
+  const service = new MarketDataService({
+    fetch: async () => { throw new Error('fetch should be replaced'); },
+    now: () => now,
+    marketRegimeTtlMs: 1_000,
+    marketRegimePartialTtlMs: 500,
+    marketRegimeStaleMs: 60_000
+  });
+  service._yahooThemeHistory = async () => {
+    calls += 1;
+    return useDangerPartial ? dangerFixture.histories : completeFixture.histories;
+  };
+
+  const complete = await service.getMarketRegime();
+  assert.notEqual(complete.regime.state, 'danger');
+  assert.equal(complete.meta.cacheTier, 'complete');
+  assert.ok(service.marketRegimeCache);
+
+  now += 2_000;
+  useDangerPartial = true;
+  const danger = await service.getMarketRegime();
+  assert.equal(danger.meta.cache, 'refreshed');
+  assert.equal(danger.meta.cacheTier, 'partial');
+  assert.equal(danger.meta.stale, false);
+  assert.equal(danger.status, 'partial');
+  assert.equal(danger.regime.state, 'danger');
+  assert.equal(danger.regime.dangerOverride, true);
+  assert.equal(danger.regime.score <= 20, true);
+  assert.ok(service.marketRegimeCache, 'last complete observation remains available for transport failure');
+  assert.ok(service.marketRegimePartialCache, 'fresh partial observation is cached separately');
+
+  const partialHit = await service.getMarketRegime();
+  assert.equal(partialHit.meta.cache, 'hit');
+  assert.equal(partialHit.meta.cacheTier, 'partial');
+  assert.equal(partialHit.regime.state, 'danger');
+  assert.equal(calls, 2);
+
+  now += 600;
+  service._yahooThemeHistory = async () => {
+    calls += 1;
+    throw new Error('upstream down');
+  };
+  const newestStale = await service.getMarketRegime();
+  assert.equal(newestStale.meta.cache, 'stale-fallback');
+  assert.equal(newestStale.meta.cacheTier, 'partial');
+  assert.equal(newestStale.meta.stale, true);
+  assert.equal(newestStale.regime.state, 'unavailable');
+  assert.equal(newestStale.regime.score, null);
+  assert.equal(newestStale.instruments.vix.value, 40);
+  assert.equal(calls, 3);
+});
+
+test('concurrent market regime callers coalesce into one shared history refresh', async () => {
+  const fixture = marketRegimeFixture();
+  let release;
+  let calls = 0;
+  const gate = new Promise(resolve => { release = resolve; });
+  const service = new MarketDataService({
+    fetch: async () => { throw new Error('fetch should be replaced'); },
+    now: () => Date.parse(fixture.retrievedAt)
+  });
+  service._yahooThemeHistory = async () => {
+    calls += 1;
+    await gate;
+    return fixture.histories;
+  };
+  const first = service.getMarketRegime();
+  const second = service.getMarketRegime();
+  await new Promise(resolve => setImmediate(resolve));
+  release();
+  const [left, right] = await Promise.all([first, second]);
+  assert.equal(calls, 1);
+  assert.equal(left.dataRevision, right.dataRevision);
+  assert.equal(service.marketRegimeInFlight, null);
+});
+
+test('force refresh queues once behind a normal refresh and caller abort does not stop shared work', async () => {
+  const fixture = marketRegimeFixture();
+  const releases = [];
+  const bypassFlags = [];
+  let calls = 0;
+  const service = new MarketDataService({
+    fetch: async () => { throw new Error('fetch should be replaced'); },
+    now: () => Date.parse(fixture.retrievedAt),
+    ttlMs: 45_000,
+    marketRegimeTtlMs: 15 * 60_000,
+    marketRegimeDeadlineMs: 5_000
+  });
+  service._yahooThemeHistory = async (_symbols, _context, options = {}) => {
+    calls += 1;
+    bypassFlags.push(options.bypassCache === true);
+    await new Promise(resolve => releases.push(resolve));
+    return fixture.histories;
+  };
+  const waitForCallCount = async expected => {
+    for (let attempt = 0; attempt < 20 && releases.length < expected; attempt += 1) {
+      await new Promise(resolve => setImmediate(resolve));
+    }
+    assert.equal(releases.length, expected);
+  };
+
+  const normal = service.getMarketRegime();
+  await waitForCallCount(1);
+  assert.equal(service.marketRegimeInFlightForce, false);
+
+  const controller = new AbortController();
+  const abortedForce = service.getMarketRegime({
+    forceRefresh: true,
+    signal: controller.signal
+  });
+  const survivingForce = service.getMarketRegime({ forceRefresh: true });
+  const sharedQueuedForce = service.marketRegimeForceQueued;
+  assert.ok(sharedQueuedForce);
+  assert.equal(service.marketRegimeForceQueued, sharedQueuedForce);
+  assert.equal(calls, 1, 'force waits for the active normal refresh');
+
+  controller.abort();
+  await assert.rejects(abortedForce, error => error?.code === 'CLIENT_ABORT');
+  assert.equal(service.marketRegimeForceQueued, sharedQueuedForce, 'caller abort leaves shared force queued');
+
+  releases[0]();
+  const normalPayload = await normal;
+  assert.equal(normalPayload.meta.refreshRequested, false);
+  await waitForCallCount(2);
+  assert.equal(service.marketRegimeInFlightForce, true);
+  assert.equal(service.marketRegimeForceQueued, sharedQueuedForce);
+
+  const joinedDuringForce = service.getMarketRegime({ forceRefresh: true });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls, 2, 'force caller joins the running forced refresh');
+
+  releases[1]();
+  const [queuedPayload, joinedPayload] = await Promise.all([survivingForce, joinedDuringForce]);
+  assert.equal(queuedPayload.meta.refreshRequested, true);
+  assert.equal(joinedPayload.meta.refreshRequested, true);
+  assert.equal(queuedPayload.meta.refreshSuppressed, false);
+  assert.equal(joinedPayload.meta.refreshSuppressed, false);
+  assert.equal(queuedPayload.dataRevision, joinedPayload.dataRevision);
+  assert.deepEqual(bypassFlags, [false, true], 'the internal queued force bypasses the floor exactly once');
+  assert.equal(calls, 2);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(service.marketRegimeInFlight, null);
+  assert.equal(service.marketRegimeInFlightForce, false);
+  assert.equal(service.marketRegimeForceQueued, null);
+});
+
+test('scoreMarketRegime exposes a bounded transparent 0-danger to 100-optimistic scale', () => {
+  const result = scoreMarketRegime({
+    vix: { level: 80, changesPct: { '1d': 30, '5d': 50, '20d': 90 } },
+    wti: { changesPct: { '1d': 10, '5d': 20, '20d': 40 } },
+    spy: { changesPct: { '1d': -5, '5d': -10, '20d': -20 } }
+  });
+  assert.equal(result.score, 0);
+  assert.equal(result.classification.id, 'danger');
+  assert.equal(result.scale.direction, '0=danger, 100=optimistic');
+  assert.ok(result.contributions.every(entry => Number.isFinite(entry.points)));
+});
+
+test('actual-like neutral observations explain zero-point VIX, SPY and WTI context', () => {
+  const result = scoreMarketRegime({
+    vix: {
+      level: 18.1,
+      changesPct: { '1d': 0.5, '5d': -2.5, '20d': 5 },
+      changesPoints: { '1d': 0.1, '5d': -0.5, '20d': 0.9 }
+    },
+    wti: { changesPct: { '1d': 1.1, '5d': 2.8, '20d': 6.2 } },
+    spy: { changesPct: { '1d': 0.2, '5d': 1.2, '20d': 4.5 } }
+  });
+
+  assert.equal(result.score, 50);
+  assert.equal(result.classification.id, 'neutral');
+  assert.equal(result.rationale.length, 3);
+  assert.ok(result.rationale.includes('VIXが通常域'));
+  assert.ok(result.rationale.includes('SPYの1・5・20日変化は警戒・楽観の判定閾値内'));
+  assert.ok(result.rationale.includes('原油上昇だけでは危険判定にしない'));
+  assert.ok(result.contributions
+    .filter(contribution => result.rationale.includes(contribution.reason))
+    .every(contribution => contribution.points === 0));
+});
+
+test('VIX hard caps prevent a high but falling VIX from becoming optimistic', () => {
+  const result = scoreMarketRegime({
+    vix: { level: 35, changesPct: { '1d': -20, '5d': -30, '20d': -50 } },
+    wti: { changesPct: { '1d': 0, '5d': 0, '20d': 0 } },
+    spy: { changesPct: { '1d': 2, '5d': 6, '20d': 13 } }
+  });
+  assert.equal(result.classification.id, 'danger');
+  assert.ok(result.score <= 29);
+  assert.ok(result.contributions.some(entry => entry.factor === 'vix-hard-cap'));
+  assert.ok(result.contributions.filter(entry => /^vix-(1d|5d|20d)$/.test(entry.factor)).length <= 1);
+  assert.ok(result.contributions.filter(entry => /^spy-(1d|5d|20d)$/.test(entry.factor)).length <= 1);
+});
+
+test('short-horizon VIX or SPY stress outranks overlapping long-horizon relief', () => {
+  const spyConflict = scoreMarketRegime({
+    vix: { level: 15, changesPct: { '1d': 0, '5d': 0, '20d': 0 } },
+    wti: { changesPct: { '1d': 0, '5d': 0, '20d': 0 } },
+    spy: { changesPct: { '1d': -3, '5d': 0, '20d': 12 } }
+  });
+  assert.ok(spyConflict.contributions.some(entry => entry.factor === 'spy-1d' && entry.points === -12));
+  assert.ok(!spyConflict.contributions.some(entry => entry.factor === 'spy-20d' && entry.points > 0));
+  assert.notEqual(spyConflict.classification.id, 'optimistic');
+
+  const vixConflict = scoreMarketRegime({
+    vix: { level: 15, changesPct: { '1d': 10, '5d': 0, '20d': -25 } },
+    wti: { changesPct: { '1d': 0, '5d': 0, '20d': 0 } },
+    spy: { changesPct: { '1d': 0, '5d': 0, '20d': 0 } }
+  });
+  assert.ok(vixConflict.contributions.some(entry => entry.factor === 'vix-1d' && entry.points === -6));
+  assert.ok(!vixConflict.contributions.some(entry => entry.factor === 'vix-20d' && entry.points > 0));
+});
+
+test('risk improvement is capped per confirmed session without delaying deterioration', () => {
+  const fixture = marketRegimeFixture({
+    sessions: 35,
+    vix: index => index === 34 ? 15 : (index === 33 ? 40 : 22),
+    wti: () => 75,
+    spy: index => index === 34 ? 530 : (index === 33 ? 450 : 500)
+  });
+  const payload = buildMarketRegimePayload(fixture.histories, fixture.retrievedAt);
+  assert.ok(payload.regime.previousRawScores.length >= 1);
+  assert.ok(payload.regime.contributions.some(entry => entry.factor === 'risk-improvement-hysteresis'));
+  assert.ok(payload.regime.score <= payload.regime.previousRawScores[0].score + 12);
+});
+
+test('revision includes older endpoints used by score hysteresis', () => {
+  const options = {
+    sessions: 35,
+    vix: index => index === 34 ? 15 : (index === 33 ? 26 : 22),
+    wti: () => 75,
+    spy: index => index === 34 ? 530 : (index === 33 ? 450 : 500)
+  };
+  const firstFixture = marketRegimeFixture(options);
+  const secondFixture = marketRegimeFixture(options);
+  secondFixture.histories.get('SPY').points[13].close = 800;
+  secondFixture.histories.get('SPY').points[13].rawClose = 800;
+  const first = buildMarketRegimePayload(firstFixture.histories, firstFixture.retrievedAt);
+  const second = buildMarketRegimePayload(secondFixture.histories, secondFixture.retrievedAt);
+
+  assert.deepEqual(first.instruments.spy.changes, second.instruments.spy.changes);
+  assert.notDeepEqual(first.regime.previousRawScores, second.regime.previousRawScores);
+  assert.notEqual(first.regime.score, second.regime.score);
+  assert.notEqual(first.dataRevision, second.dataRevision);
+});
+
+test('fresh high VIX can escalate danger with missing inputs but missing data cannot reassure', () => {
+  const highVix = marketRegimeFixture({ vix: () => 35 });
+  highVix.histories.delete('CL=F');
+  const danger = buildMarketRegimePayload(highVix.histories, highVix.retrievedAt);
+  assert.equal(danger.status, 'partial');
+  assert.equal(danger.regime.state, 'danger');
+  assert.equal(danger.regime.dangerOverride, true);
+  assert.equal(danger.regime.tradeEligible, false);
+
+  const lowVix = marketRegimeFixture({ vix: () => 15 });
+  lowVix.histories.delete('CL=F');
+  const blockedReassurance = buildMarketRegimePayload(lowVix.histories, lowVix.retrievedAt);
+  assert.equal(blockedReassurance.regime.state, 'unavailable');
+  assert.equal(blockedReassurance.regime.score, null);
+});
+
+test('a futures weekend open period does not discard the last confirmed Friday WTI bar', () => {
+  const friday = Date.parse('2026-07-24T21:00:00Z') / 1000;
+  const sundayStart = Date.parse('2026-07-26T22:00:00Z') / 1000;
+  const payload = {
+    spark: {
+      result: [{
+        symbol: 'CL=F',
+        response: [{
+          meta: {
+            currency: 'USD',
+            regularMarketTime: friday,
+            currentTradingPeriod: {
+              regular: {
+                start: sundayStart,
+                end: Date.parse('2026-07-27T21:00:00Z') / 1000
+              }
+            }
+          },
+          timestamp: [friday],
+          indicators: {
+            quote: [{ close: [78.5] }]
+          }
+        }]
+      }]
+    }
+  };
+  const parsed = parseYahooThemeHistory(payload, Date.parse('2026-07-26T23:00:00Z'));
+  assert.equal(parsed.get('CL=F').points.length, 1);
+  assert.equal(parsed.get('CL=F').excludedOpenSession, false);
+});
+
+test('WTI nonpositive closes are preserved while percentage returns remain undefined', () => {
+  const timestamp = Date.parse('2020-04-20T21:00:00Z') / 1000;
+  const points = normalizeHistoryPoints({
+    timestamp: [timestamp],
+    indicators: { quote: [{ close: [-37.63] }] }
+  }, 'CL=F');
+  assert.equal(points.length, 1);
+  assert.equal(points[0].rawClose, -37.63);
+});
+
+function technicalChart(
+  symbol,
+  count = 1_320,
+  start = '2021-01-04T21:00:00Z',
+  metadata = {}
+) {
+  const timestamp = [];
+  const open = [];
+  const high = [];
+  const low = [];
+  const close = [];
+  const volume = [];
+  const adjusted = [];
+  const date = new Date(start);
+  let session = 0;
+  while (timestamp.length < count) {
+    if (![0, 6].includes(date.getUTCDay())) {
+      const value = 60 * Math.exp(session * 0.00035) *
+        (1 + Math.sin(session / 7) * 0.045 + Math.sin(session / 23) * 0.015);
+      const opening = value * (1 - Math.sin(session / 5) * 0.003);
+      timestamp.push(Math.floor(date.getTime() / 1000));
+      open.push(opening);
+      high.push(Math.max(opening, value) * 1.007);
+      low.push(Math.min(opening, value) * 0.993);
+      close.push(value);
+      volume.push(1_000_000 + (session % 17) * 10_000);
+      adjusted.push(value);
+      session += 1;
+    }
+    date.setUTCDate(date.getUTCDate() + 1);
+  }
+  return {
+    meta: {
+      symbol,
+      currency: 'USD',
+      regularMarketPrice: close.at(-1),
+      regularMarketTime: timestamp.at(-1),
+      fullExchangeName: 'NasdaqGS',
+      quoteType: 'EQUITY',
+      instrumentType: 'EQUITY',
+      longName: `${symbol} Corporation`,
+      shortName: symbol,
+      ...metadata,
+      currentTradingPeriod: {}
+    },
+    timestamp,
+    indicators: {
+      quote: [{ open, high, low, close, volume }],
+      adjclose: [{ adjclose: adjusted }]
+    }
+  };
+}
+
+function technicalSparkPayload(symbols, count = 1_320, metadataBySymbol = {}) {
+  return {
+    spark: {
+      result: symbols.map(symbol => ({
+        symbol,
+        response: [technicalChart(symbol, count, '2021-01-04T21:00:00Z', metadataBySymbol[symbol])]
+      })),
+      error: null
+    }
+  };
+}
+
+test('technical Yahoo parser requires real OHLC and never fills a missing open from close', () => {
+  const valid = technicalChart('NVDA', 3);
+  const invalid = structuredClone(valid);
+  invalid.indicators.quote[0].open[1] = null;
+  const bars = normalizeTechnicalBars(invalid);
+  assert.equal(bars.length, 2);
+  assert.equal(bars.some(bar => bar.sessionDate === new Date(valid.timestamp[1] * 1000).toISOString().slice(0, 10)), false);
+
+  const parsed = parseYahooTechnicalHistory({
+    spark: { result: [{ symbol: 'NVDA', response: [invalid] }] }
+  }, Date.parse('2026-07-30T12:00:00Z'));
+  assert.equal(parsed.get('NVDA').bars.length, 2);
+  assert.equal(parsed.get('NVDA').partial, true);
+  assert.equal(parsed.get('NVDA').quoteType, 'EQUITY');
+  assert.equal(parsed.get('NVDA').longName, 'NVDA Corporation');
+  assert.ok(parsed.get('NVDA').ohlcCoveragePct < 100);
+
+  const chartHistory = parseYahooTechnicalChartHistory({
+    chart: { result: [valid], error: null }
+  }, 'NVDA', Date.parse('2026-07-30T12:00:00Z'));
+  assert.equal(chartHistory.bars.length, 3);
+  assert.equal(chartHistory.source, 'yahoo-chart-v8-5y-1d');
+});
+
+test('technical history falls back to Yahoo Chart v8 when Spark exposes close-only data', async () => {
+  const fullChart = technicalChart('SPY');
+  const closeOnlyChart = {
+    meta: fullChart.meta,
+    timestamp: fullChart.timestamp,
+    indicators: { quote: [{ close: fullChart.indicators.quote[0].close }] }
+  };
+  const latest = fullChart.timestamp.at(-1) * 1000;
+  const calls = [];
+  const service = new MarketDataService({
+    fetch: async url => {
+      const href = String(url);
+      calls.push(href);
+      const payload = href.includes('/v8/finance/chart/')
+        ? { chart: { result: [fullChart], error: null } }
+        : { spark: { result: [{ symbol: 'SPY', response: [closeOnlyChart] }], error: null } };
+      return new Response(JSON.stringify(payload), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      });
+    },
+    now: () => latest + 12 * 60 * 60 * 1000,
+    clock: () => latest + 12 * 60 * 60 * 1000,
+    sleep: async () => {}
+  });
+  const first = await service.getBuySignals({
+    symbols: ['SPY'],
+    intelligencePayload: { status: 'partial', themes: [] }
+  });
+  const callCountAfterFirst = calls.length;
+  const second = await service.getBuySignals({
+    symbols: ['SPY'],
+    intelligencePayload: { status: 'partial', themes: [] }
+  });
+  assert.ok(calls.some(url => url.includes('/v7/finance/spark')));
+  assert.ok(calls.some(url => url.includes('/v8/finance/chart/SPY')));
+  assert.equal(first.results[0].quality.dailyBars, 1_320);
+  assert.equal(first.results[0].quality.source, 'yahoo-chart-v8-5y-1d');
+  assert.notEqual(first.results[0].status, 'unavailable');
+  assert.equal(second.results[0].quality.cacheState, 'hit');
+  assert.equal(calls.length, callCountAfterFirst);
+});
+
+test('buy signals use one dedicated 5y/1d Yahoo batch, cache it, and fail closed on optional evidence', async () => {
+  const calls = [];
+  const payload = technicalSparkPayload(['NVDA']);
+  const latest = payload.spark.result[0].response[0].timestamp.at(-1) * 1000;
+  const service = new MarketDataService({
+    fetch: async url => {
+      calls.push(String(url));
+      return new Response(JSON.stringify(payload), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      });
+    },
+    now: () => latest + 12 * 60 * 60 * 1000,
+    clock: () => latest + 12 * 60 * 60 * 1000,
+    sleep: async () => {}
+  });
+  const intelligencePayload = {
+    status: 'ok',
+    asOf: new Date(latest).toISOString().slice(0, 10),
+    themes: [{
+      id: 'ai-semiconductors',
+      name: 'AI半導体',
+      status: 'ok',
+      score: 82,
+      trend: 'up',
+      breadth: 70,
+      confidence: 90,
+      relatedTickers: ['NVDA']
+    }]
+  };
+  const account = {
+    equityJpy: 10_000_000,
+    cashJpy: 2_000_000,
+    usdJpy: 150,
+    riskBudgetJpy: 100_000,
+    existingOpenRiskJpy: 0,
+    maxPositionPct: 10
+  };
+  const first = await service.getBuySignals({
+    symbols: ['NVDA'],
+    intelligencePayload,
+    account
+  });
+  const second = await service.getBuySignals({
+    symbols: ['NVDA'],
+    intelligencePayload,
+    account
+  });
+  assert.equal(calls.length, 1);
+  assert.match(calls[0], /range=5y/);
+  assert.match(calls[0], /interval=1d/);
+  assert.equal(first.results.length, 1);
+  assert.equal(first.results[0].signals.total, 8);
+  assert.ok([true, 'unavailable'].includes(first.results[0].signals.supportBounce));
+  assert.equal(first.results[0].fundamental.status, 'unavailable');
+  assert.equal(first.results[0].dataStatus, 'partial');
+  assert.equal(first.results[0].tradeEligible, false);
+  assert.equal(second.results[0].quality.cacheState, 'hit');
+});
+
+test('technical service marks short-history symbols unavailable and backtests A-E with SPY only as benchmark', async () => {
+  const payload = technicalSparkPayload(['SNDK', 'SPY'], 520);
+  const latest = payload.spark.result[0].response[0].timestamp.at(-1) * 1000;
+  const service = new MarketDataService({
+    fetch: async () => new Response(JSON.stringify(payload), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    }),
+    now: () => latest + 12 * 60 * 60 * 1000,
+    clock: () => latest + 12 * 60 * 60 * 1000,
+    sleep: async () => {}
+  });
+  const signals = await service.getBuySignals({
+    symbols: ['SNDK'],
+    intelligencePayload: { status: 'partial', themes: [] },
+    account: {}
+  });
+  assert.equal(signals.status, 'unavailable');
+  assert.equal(signals.results[0].status, 'unavailable');
+  assert.equal(signals.results[0].decision, 'unavailable');
+
+  const backtest = await service.getTechnicalBacktest({
+    symbols: ['SNDK'],
+    commissionBps: 1,
+    slippageBps: 10
+  });
+  assert.equal(backtest.results[0].status, 'unavailable');
+  assert.equal(backtest.results[0].backtest.status, 'unavailable');
+});
+
+test('buy-signal integration blocks known leveraged ETFs and caps metadata-less ETFs', async () => {
+  const symbols = ['QLD', 'SSO', 'MSTU', 'NVDA', 'MYST'];
+  const payload = technicalSparkPayload(symbols, 1_320, {
+    QLD: {
+      quoteType: 'ETF',
+      instrumentType: 'ETF',
+      longName: 'ProShares Ultra QQQ',
+      shortName: 'QLD'
+    },
+    SSO: {
+      quoteType: 'ETF',
+      instrumentType: 'ETF',
+      longName: 'ProShares Ultra S&P500',
+      shortName: 'SSO'
+    },
+    MSTU: {
+      quoteType: 'ETF',
+      instrumentType: 'ETF',
+      longName: 'T-Rex 2X Long MSTR Daily Target ETF',
+      shortName: 'MSTU'
+    },
+    MYST: {
+      quoteType: 'ETF',
+      instrumentType: 'ETF',
+      longName: null,
+      shortName: null
+    }
+  });
+  const latest = payload.spark.result[0].response[0].timestamp.at(-1) * 1000;
+  let calls = 0;
+  const service = new MarketDataService({
+    fetch: async () => {
+      calls += 1;
+      return new Response(JSON.stringify(payload), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      });
+    },
+    now: () => latest + 12 * 60 * 60 * 1000,
+    clock: () => latest + 12 * 60 * 60 * 1000,
+    sleep: async () => {}
+  });
+  const response = await service.getBuySignals({
+    symbols,
+    intelligencePayload: { status: 'partial', themes: [] },
+    account: {
+      equityJpy: 10_000_000,
+      cashJpy: 2_000_000,
+      usdJpy: 150,
+      riskBudgetJpy: 100_000
+    }
+  });
+  assert.equal(calls, 1);
+  const bySymbol = new Map(response.results.map(result => [result.symbol, result]));
+  for (const symbol of ['QLD', 'SSO', 'MSTU']) {
+    assert.equal(bySymbol.get(symbol).leverageStatus, 'leveraged', symbol);
+    assert.equal(bySymbol.get(symbol).leverageProvenance.source, 'static-leveraged-symbol', symbol);
+    assert.equal(bySymbol.get(symbol).positionPlan.shares, 0, symbol);
+  }
+  assert.equal(bySymbol.get('NVDA').leverageStatus, 'unleveraged');
+  assert.equal(bySymbol.get('NVDA').leverageProvenance.source, 'yahoo-quote-type');
+  assert.equal(bySymbol.get('MYST').leverageStatus, 'unavailable');
+  assert.equal(bySymbol.get('MYST').leverageBlocked, true);
+  assert.ok(bySymbol.get('MYST').caps.some(cap => cap.key === 'leverage-unavailable'));
+  assert.equal(bySymbol.get('MYST').positionPlan.shares, 0);
+});
+
+test('full technical backtest batches target with SPY, exposes A-F, and supports cancellation', async () => {
+  const payload = technicalSparkPayload(['NVDA', 'SPY'], 1_320, {
+    SPY: {
+      quoteType: 'ETF',
+      instrumentType: 'ETF',
+      longName: 'SPDR S&P 500 ETF Trust',
+      shortName: 'SPY'
+    }
+  });
+  const latest = payload.spark.result[0].response[0].timestamp.at(-1) * 1000;
+  let calls = 0;
+  const service = new MarketDataService({
+    fetch: async () => {
+      calls += 1;
+      return new Response(JSON.stringify(payload), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      });
+    },
+    now: () => latest + 12 * 60 * 60 * 1000,
+    clock: () => latest + 12 * 60 * 60 * 1000,
+    sleep: async () => {}
+  });
+  const response = await service.getTechnicalBacktest({
+    symbols: ['NVDA'],
+    commissionBps: 2,
+    slippageBps: 8
+  });
+  assert.equal(calls, 1);
+  assert.equal(response.results[0].backtest.status, 'ok');
+  assert.deepEqual(
+    response.results[0].backtest.strategies.map(strategy => strategy.id),
+    ['A', 'B', 'C', 'D', 'E', 'F']
+  );
+  assert.equal(response.results[0].backtest.strategies.at(-1).status, 'unavailable');
+  assert.equal(response.results[0].backtest.assumptions.benchmark, 'SPY');
+
+  const controller = new AbortController();
+  controller.abort();
+  const cancelled = new MarketDataService({
+    fetch: async () => {
+      throw new Error('fetch should not run after cancellation');
+    },
+    sleep: async () => {}
+  });
+  await assert.rejects(
+    cancelled.getTechnicalBacktest({ symbols: ['NVDA'], signal: controller.signal }),
+    error => error?.code === 'CLIENT_ABORT'
+  );
 });

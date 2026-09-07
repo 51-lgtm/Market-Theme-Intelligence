@@ -8,6 +8,7 @@ const vm = require('node:vm');
 
 const root = path.join(__dirname, '..');
 const html = fs.readFileSync(path.join(root, 'index.html'), 'utf8');
+const readme = fs.readFileSync(path.join(root, 'README.md'), 'utf8');
 const functionBlock = (startName, nextName) => {
   const start = html.indexOf(`function ${startName}(`);
   const end = html.indexOf(`function ${nextName}(`, start + 1);
@@ -43,7 +44,7 @@ test('inline application JavaScript parses successfully', () => {
   assert.match(html, /safeStateId/);
 });
 
-test('v13 keeps v12 risk controls and remains v3-storage compatible', () => {
+test('v14 keeps prior risk controls and remains v3-storage compatible', () => {
   assert.match(html, /PORTFOLIO X-RAY/);
   assert.match(html, /id="portfolio-xray"/);
   assert.match(html, /role="progressbar"/);
@@ -52,7 +53,7 @@ test('v13 keeps v12 risk controls and remains v3-storage compatible', () => {
   assert.match(html, /id="stress-results" aria-live="polite"/);
   assert.match(html, /drawdownPct/);
   assert.match(html, /円換算残高DD／入出金未調整／履歴最大180日・最高残高継続/);
-  assert.match(html, /<meta property="og:image" content="\/og\.png">/);
+  assert.match(html, /<meta property="og:image" content="\/og-v14-technical-signals\.png">/);
   assert.match(html, /TRACE ID/);
   assert.match(html, /qualityParts/);
   assert.match(html, /RISK ENGINE 95/);
@@ -61,7 +62,7 @@ test('v13 keeps v12 risk controls and remains v3-storage compatible', () => {
   assert.match(html, /STOP価格での約定は保証されず/);
   assert.match(html, /function orderPlanner\(pre\)\{\s*openTradeGate\(pre\|\|\{\}\)/);
   assert.doesNotMatch(html, /function opToPos\(/);
-  assert.match(html, /US COMMAND ULTRA v13\.0 — MARKET THEME INTELLIGENCE EDITION/);
+  assert.match(html, /US COMMAND ULTRA v14\.0 — TECHNICAL SIGNAL WATCH \/ SIMULATE ONLY/);
   assert.match(html, /const KEY='uscmd_ultra_v3'/);
   assert.match(html, /out\.v=3/);
   assert.match(html, /S\.spark\['JPY=X'\]=fxCloses/);
@@ -366,7 +367,7 @@ test('backup migration normalizes hostile numeric fields and malformed collectio
     journal: [{ id: 'j', ticker: 'AAPL', shares: '<img>', price: 100 }],
     events: [{ id: 'e', ticker: 'AAPL', date: null, label: null }],
     themes: [null],
-    sync: { failures: {}, requestIds: ["bad' onclick='x"] }
+    sync: { failures: {}, requestIds: ["bad' onclick='x"], marketRegime: { status: "ready' onclick='x", vix: '<img>', wti: 71.25, asOf: '<script>', cache: 'owned', cacheAgeMs: -5, refreshRequested: 'true', refreshSuppressed: true, error: '<img src=x onerror=alert(1)>' } }
   };
   const context = { payload };
   vm.runInNewContext(`${migrationBlock()}; result = migrateState(payload);`, context);
@@ -389,6 +390,14 @@ test('backup migration normalizes hostile numeric fields and malformed collectio
   assert.equal(state.plan.dos.length, 0);
   assert.match(state.plan.donts[0].id, /^[A-Za-z0-9_-]+$/);
   assert.deepEqual(Array.from(state.sync.requestIds), []);
+  assert.equal(state.sync.marketRegime.status, 'error');
+  assert.equal(state.sync.marketRegime.vix, null);
+  assert.equal(state.sync.marketRegime.wti, 71.25);
+  assert.equal(state.sync.marketRegime.asOf, '<script>');
+  assert.equal(state.sync.marketRegime.cache, '');
+  assert.equal(state.sync.marketRegime.cacheAgeMs, null);
+  assert.equal(state.sync.marketRegime.refreshRequested, false);
+  assert.equal(state.sync.marketRegime.refreshSuppressed, true);
   assert.match(html, /MAX_IMPORT_BYTES=5\*1024\*1024/);
   assert.match(html, /f\.size>MAX_IMPORT_BYTES/);
   assert.match(html, /localConnection=\{apiBase:S\.settings\?\.apiBase/);
@@ -642,4 +651,824 @@ test('v13 avoids simultaneous cold starts of legacy and intelligence theme endpo
   assert.match(initSource, /startAfterIntelligence/);
   assert.match(initSource, /IntelligenceOS\.loading\|\|\['idle','loading','refreshing'\]\.includes\(IntelligenceOS\.status\)/);
   assert.match(initSource, /setTimeout\(startAfterIntelligence,900\)/);
+});
+
+test('v13.1 RRG normalizer keeps 21 unique frames, derives quadrants and rejects invalid coordinates', () => {
+  const start = html.indexOf('function normalizeIntelAvailability(');
+  const end = html.indexOf('function adoptIntelligencePayload(', start);
+  const source = html.slice(start, end);
+  const context = {
+    intelNumber: (value, min, max) => value == null || value === '' || !Number.isFinite(Number(value)) || Number(value) < min || Number(value) > max ? null : Number(value),
+    intelId: value => String(value || '').trim().toLowerCase(),
+    intelSymbolList: value => (Array.isArray(value) ? value : []).map(item => String(item || '').toUpperCase()).filter(Boolean),
+    normalizeTicker: value => String(value || '').toUpperCase(),
+    TICKER_RE: /^[A-Z0-9][A-Z0-9.-]*$/,
+    THEME_PERIODS: ['1d', '5d', '1m', '1y'],
+    INTELLIGENCE_EDGE_TYPES: ['supply-chain'],
+    safeText: (value, max = 1000) => String(value ?? '').slice(0, max)
+  };
+  const dates = Array.from({ length: 24 }, (_, index) => `2026-06-${String(index + 1).padStart(2, '0')}`);
+  const trail = dates.map((date, index) => ({ date, longRelativePct: index - 10, shortRelativePct: 10 - index, quadrant: 'hostile', status: 'ok', coveragePct: 100, priceMode: 'raw-close-fallback' }));
+  trail.push({ date: dates.at(-1), longRelativePct: Infinity, shortRelativePct: 3, quadrant: 'leader', status: 'ok' });
+  const payload = {
+    status: 'ok', actualFundFlow: false,
+    rrg: { status: 'ok', benchmark: 'SPY', dates: [...dates].reverse().concat(dates.at(-1)), longPeriodSessions: 63, shortPeriodSessions: 5, trailSessions: 20, quadrantCounts: {} },
+    summary: { market: { id: 'market', name: 'MARKET', themeIds: ['gpu'] } }, categories: [], edges: [],
+    themes: [{ id: 'gpu', name: 'GPU', categoryId: 'semiconductors', relatedTickers: ['NVDA'], coverage: { pct: 100 }, availability: {}, constituents: [], score: 70, status: 'ok', rrg: { status: 'ok', benchmark: 'SPY', longRelativePct: Infinity, shortRelativePct: 3, trail } }]
+  };
+  vm.runInNewContext(`${source}; result = normalizeIntelligencePayload(payload);`, Object.assign(context, { payload }));
+  const normalized = context.result;
+  assert.equal(normalized.rrg.dates.length, 21);
+  assert.deepEqual(Array.from(normalized.rrg.dates), [...new Set(normalized.rrg.dates)].sort());
+  assert.equal(normalized.themes[0].rrg.trail.length, 21);
+  assert.equal(normalized.themes[0].rrg.longRelativePct, null);
+  assert.equal(normalized.themes[0].rrg.quadrant, null);
+  const finitePoint = normalized.themes[0].rrg.trail.find(point => point.longRelativePct != null && point.shortRelativePct != null);
+  assert.equal(finitePoint.quadrant, finitePoint.longRelativePct >= 0 ? (finitePoint.shortRelativePct >= 0 ? 'leader' : 'weakening') : (finitePoint.shortRelativePct >= 0 ? 'rebound' : 'lagging'));
+});
+
+test('v13.1 RRG view exposes four quadrants, 20-day controls, accessible fallback and fixed-scale trails', () => {
+  assert.match(html, /INTELLIGENCE_VIEWS=\['map','rrg','ranking','rotation-up','rotation-down','next'\]/);
+  assert.match(html, /rrg:'RRG 4象限'/);
+  assert.match(html, /RRG型・価格ローテーション参考図/);
+  assert.match(html, /63営業日 SPY対比・対数リターン差/);
+  assert.match(html, /5営業日 SPY対比・対数リターン差/);
+  assert.match(html, /右上リーダー、右下調整、左上短期反発、左下弱/);
+  assert.match(html, /\[-20,'-20D'\][\s\S]*\[0,'最新'\]/);
+  assert.match(html, /▶ 20日再生/);
+  assert.match(html, /role="group" aria-labelledby="rrg-title rrg-desc"/);
+  assert.doesNotMatch(html, /class="rrg-chart"[^>]*role="img"/);
+  assert.match(html, /同内容のアクセシブル一覧/);
+  assert.match(html, /class="rrg-table-theme"/);
+  assert.match(html, /RRG \$\{qualityStatus\.toUpperCase\(\)\}/);
+  assert.match(html, /現在座標[\s\S]*完全trail[\s\S]*API available/);
+  assert.match(html, /rrgFixedDomain\(baseThemes\)/);
+  assert.match(html, /rrg-trail\$\{theme\.id===IntelligenceOS\.selectedId\?' selected':''\}/);
+  assert.match(html, /現行固定バスケットのbackcast/);
+  assert.match(html, /公式RRG指標・実資金フロー・投資助言ではありません/);
+  assert.match(html, /配当を含まず、分割などの企業行動/);
+  assert.match(html, /\.rrg-scroll\{overflow-x:auto/);
+  assert.match(html, /\.rrg-chart\{display:block;width:100%;min-width:660px/);
+});
+
+test('v13.1 RRG playback is bounded, single-timer, reduced-motion aware and cleaned up', () => {
+  const source = html.slice(html.indexOf('function rrgPointAt('), html.indexOf('function intelligenceListPanel('));
+  assert.match(source, /if\(IntelligenceOS\.rrgTimer\)\{clearInterval\(IntelligenceOS\.rrgTimer\)/);
+  assert.match(source, /rrgReducedMotionQuery\?\.matches/);
+  assert.match(html, /rrgReducedMotionQuery\?\.addEventListener\?\.\('change'/);
+  assert.match(source, /if\(IntelligenceOS\.rrgCursor>=last\)\{rrgStopPlayback\(\);return\}/);
+  assert.match(source, /IntelligenceOS\.rrgCursor\+=1/);
+  assert.match(source, /document\.hidden/);
+  assert.match(html, /if\(t!=='mkt'\)rrgStopPlayback\(false\)/);
+  assert.match(html, /visibilitychange[\s\S]*document\.hidden\)rrgStopPlayback\(false\)/);
+  assert.match(html, /fetchIntelligence\(silent\)\{[\s\S]*rrgStopPlayback\(false\)/);
+  assert.match(html, /@media\(prefers-reduced-motion:reduce\)[\s\S]*\.rrg-node/);
+});
+
+test('v13.1 AI receives revision-scoped RRG movement without treating it as capital flow', () => {
+  const contextSource = functionBlock('intelligenceRrgPromptContexts', 'requestIntelligenceAnalysis');
+  const source = contextSource + functionBlock('requestIntelligenceAnalysis', 'intelligenceCategoryName');
+  assert.match(source, /RRG-STYLE OBSERVED PRICE CONTEXT/);
+  assert.match(source, /rrgTransitions/);
+  assert.match(source, /priceMode:theme\.rrg\?\.priceMode/);
+  assert.match(source, /RRG位置を資金流入額と呼ばず/);
+  assert.match(source, /raw終値・配当除外・企業行動の注意点/);
+  assert.match(source, /dataRevision:safeText\(IntelligenceOS\.dataRevision,96\)/);
+  assert.doesNotMatch(source, /S\.positions|S\.cash/);
+});
+
+test('v13.1 RRG label layout is collision-aware, keeps the selection and permits thinning', () => {
+  const source = functionBlock('rrgRectsOverlap', 'rrgPanelFocusKey');
+  const rows = Array.from({ length: 12 }, (_, index) => ({
+    theme: { id: index === 7 ? 'selected' : `theme-${index}`, name: `テーマ${index}` },
+    point: { longRelativePct: 100, shortRelativePct: 100 }
+  }));
+  const context = { rows, bounds: { left: 0, right: 220, top: 0, bottom: 220 } };
+  vm.runInNewContext(`${source}; result = rrgLabelLayout(rows, value => value, value => value, bounds, 'selected');`, context);
+  const shown = Array.from(context.result.values()).filter(item => item.showLabel);
+  assert.equal(context.result.get('selected').showLabel, true);
+  assert.ok(shown.length < rows.length, 'dense labels should be thinned');
+  for (let left = 0; left < shown.length; left += 1) {
+    for (let right = left + 1; right < shown.length; right += 1) {
+      const a = shown[left].rect, b = shown[right].rect;
+      assert.equal(a.x < b.x + b.w + 2 && a.x + a.w + 2 > b.x && a.y < b.y + b.h + 2 && a.y + a.h + 2 > b.y, false);
+    }
+  }
+  const panelSource = functionBlock('intelligenceRrgPanel', 'intelligenceListPanel');
+  assert.match(panelSource, /renderRows=\[\.\.\.currentRows\]\.sort/);
+  assert.doesNotMatch(panelSource, /selectedRow=.*\|\|currentRows\[0\]/);
+  assert.match(panelSource, /詳細は同じ選択テーマを表示しています/);
+  assert.match(panelSource, /class="rrg-table-theme"[\s\S]*selectIntelligenceTheme/);
+});
+
+test('v13.1 RRG partial rendering restores the active control and avoids live-region churn', () => {
+  const source = functionBlock('rrgPanelFocusKey', 'rrgStopPlayback');
+  const tracker = { focusCalls: 0, options: null };
+  const active = { getAttribute: key => key === 'data-rrg-focus' ? 'play' : null };
+  const replacement = { getAttribute: key => key === 'data-rrg-focus' ? 'play' : null, focus: options => { tracker.focusCalls += 1; tracker.options = options; } };
+  const panel = { innerHTML: 'old', contains: node => node === active, querySelectorAll: () => [replacement] };
+  const context = {
+    tracker, panel,
+    document: { activeElement: active, querySelector: selector => selector === '#intel-view-panel' ? panel : null },
+    IntelligenceOS: { view: 'rrg' }, cur: 'mkt',
+    safeText: value => String(value || '').slice(0, 100),
+    requestAnimationFrame: callback => callback(),
+    intelligenceRrgPanel: () => '<section>updated</section>'
+  };
+  vm.runInNewContext(`${source}; rrgRenderOnly();`, context);
+  assert.equal(panel.innerHTML, '<section>updated</section>');
+  assert.equal(tracker.focusCalls, 1);
+  assert.equal(tracker.options.preventScroll, true);
+  const panelSource = functionBlock('intelligenceRrgPanel', 'intelligenceListPanel');
+  assert.doesNotMatch(panelSource, /aria-live=/);
+  assert.doesNotMatch(panelSource, /class="rrg-node[\s\S]*?onkeydown=/);
+  assert.match(panelSource, /role="group" aria-labelledby="rrg-title rrg-desc"/);
+});
+
+test('v13.1 RRG playback emits exactly 21 ordered frames and leaves no interval behind', () => {
+  const source = functionBlock('rrgStopPlayback', 'intelligenceRrgPanel');
+  const clock = { created: 0, cleared: 0, tick: null, frames: [] };
+  const context = {
+    clock,
+    IntelligenceOS: { rrg: { dates: Array.from({ length: 21 }, (_, index) => `d${index}`) }, rrgCursor: 20, rrgPlaying: false, rrgTimer: null, view: 'rrg' },
+    rrgReducedMotionQuery: { matches: false }, cur: 'mkt', document: { hidden: false }, toast: () => {},
+    rrgRenderOnly: () => clock.frames.push(context.IntelligenceOS.rrgCursor),
+    setInterval: callback => { clock.created += 1; clock.tick = callback; return clock.created; },
+    clearInterval: () => { clock.cleared += 1; }
+  };
+  vm.runInNewContext(`${source}; rrgTogglePlayback(); for(let index=0;index<21;index+=1)clock.tick(); result={cursor:IntelligenceOS.rrgCursor,playing:IntelligenceOS.rrgPlaying,timer:IntelligenceOS.rrgTimer};`, context);
+  assert.deepEqual(clock.frames.slice(0, 21), Array.from({ length: 21 }, (_, index) => index));
+  assert.equal(clock.created, 1);
+  assert.equal(clock.cleared, 1);
+  assert.equal(context.result.cursor, 20);
+  assert.equal(context.result.playing, false);
+  assert.equal(context.result.timer, null);
+});
+
+test('v13.1 AI RRG context requires the exact reference date and breaks transitions at gaps', () => {
+  const source = functionBlock('intelligenceRrgPromptContexts', 'requestIntelligenceAnalysis').replace(/\s*async\s*$/, '');
+  const dates = ['2026-07-13', '2026-07-14', '2026-07-15', '2026-07-16', '2026-07-17'];
+  const theme = {
+    status: 'partial', eligible: false,
+    availability: { eligible: false, coveragePct: 80, missing: ['2026-07-15', '2026-07-17'], reason: 'gaps' },
+    rrg: { status: 'partial', benchmark: 'SPY', longPeriodSessions: 63, shortPeriodSessions: 5, priceMode: 'raw-close-fallback', dividendAdjusted: false, coverage: { returned: 3, requested: 5 }, trail: [
+      { date: dates[0], longRelativePct: 2, shortRelativePct: 1, status: 'ok' },
+      { date: dates[1], longRelativePct: 3, shortRelativePct: 1, status: 'ok' },
+      { date: dates[2], longRelativePct: null, shortRelativePct: null, status: 'unavailable' },
+      { date: dates[3], longRelativePct: -2, shortRelativePct: -1, status: 'ok' },
+      { date: dates[4], longRelativePct: null, shortRelativePct: null, status: 'unavailable' }
+    ] }
+  };
+  const context = {
+    theme, normalizeRrgDates: value => Array.from(value),
+    rrgQuadrantFrom: (x, y) => x >= 0 ? (y >= 0 ? 'leader' : 'weakening') : (y >= 0 ? 'rebound' : 'lagging'),
+    RRG_LABELS: { leader: 'リーダー', weakening: '調整', rebound: '短期反発', lagging: '弱' },
+    intelligenceCoveragePct: () => 80,
+    IntelligenceOS: { status: 'stale', partial: true, fromCache: true, meta: { stale: true, cache: 'stale-fallback' }, rrg: { dates, asOf: dates.at(-1), status: 'partial', benchmark: 'SPY', longPeriodSessions: 63, shortPeriodSessions: 5, trailSessions: 20, availableThemeCount: 1, themeCount: 1 } }
+  };
+  vm.runInNewContext(`${source}; result=intelligenceRrgPromptContexts(theme);`, context);
+  assert.equal(context.result.rrgContext.currentExact, null);
+  assert.equal(context.result.rrgContext.latestValidObservation.date, dates[3]);
+  assert.deepEqual(Array.from(context.result.rrgContext.gapDates), [dates[2], dates[4]]);
+  assert.equal(context.result.rrgContext.transitions.at(-1).continuousFromPrevious, false);
+  assert.equal(context.result.qualityContext.stale, true);
+  assert.deepEqual(Array.from(context.result.qualityContext.themeAvailability.missing), ['2026-07-15', '2026-07-17']);
+});
+
+test('market regime normalizer is defensive and preserves VIX WTI SPY observations without inventing data', () => {
+  const source = functionBlock('normalizeRegimeInstrument', 'normalizeMarketRegimePayload') + functionBlock('normalizeMarketRegimePayload', 'marketRegimeIsStale');
+  const context = {
+    MARKET_REGIME_LABELS: { danger: '危険', caution: '警戒', neutral: '中立', optimistic: '楽観' },
+    regimeNumber: (value, min, max) => {
+      if (value == null || value === '') return null;
+      const number = Number(value);
+      return Number.isFinite(number) && number >= min && number <= max ? number : null;
+    },
+    safeText: (value, max = 1000) => String(value ?? '').slice(0, max)
+  };
+  const trail = Array.from({ length: 25 }, (_, index) => ({ date: `2026-07-${String(index + 1).padStart(2, '0')}`, value: 20 + index }));
+  context.payload = {
+    status: 'partial',
+    asOf: '2026-07-26T12:00:00Z',
+    regime: { state: 'danger', label: '危険', optimismScore: 18, riskScore: 82, confidence: 91, referenceOnly: true, watchOnly: true, tradeEligible: false, reasons: ['VIX上昇', { text: '株価の弱含み' }] },
+    instruments: {
+      vix: { value: 24.5, changePct: 5, change5dPct: 8, change20dPct: 12, changesPoints: { '1d': 1.2, '5d': 1.8, '20d': 2.4 }, source: 'yahoo-spark', priceMode: 'native-index-close', trail },
+      wti: { price: Infinity, changes: { '1d': -2 }, source: 'yahoo-spark', priceMode: 'native-futures-close' },
+      spy: { price: 610, changes: { '1d': 1, '5d': 2, '20d': 3 }, source: 'yahoo-chart-v8-adjusted', priceMode: 'adjusted-close' }
+    },
+    availability: { coveragePct: 67, partial: true, missing: ['wti'] },
+    meta: { cache: 'hit', cacheTier: 'partial', cacheAgeMs: 1234, refreshRequested: true, refreshSuppressed: true, source: { provider: 'Yahoo Finance', id: 'yahoo-chart', official: false, bestEffort: true, inputs: { vix: 'yahoo-spark', wti: 'yahoo-spark', spy: 'yahoo-chart-v8-adjusted' } } }
+  };
+  vm.runInNewContext(`${source}; result=normalizeMarketRegimePayload(payload);`, context);
+  assert.equal(context.result.label, 'danger');
+  assert.equal(context.result.labelText, '危険');
+  assert.equal(context.result.riskScore, 82);
+  assert.equal(context.result.optimismScore, 18);
+  assert.equal(context.result.instruments.vix.changes['1d'], 5);
+  assert.equal(context.result.instruments.vix.changesPoints['20d'], 2.4);
+  assert.equal(context.result.instruments.vix.trail.length, 21);
+  assert.equal(context.result.instruments.vix.source, 'yahoo-spark');
+  assert.equal(context.result.instruments.vix.priceMode, 'native-index-close');
+  assert.equal(context.result.instruments.wti.value, null);
+  assert.equal(context.result.instruments.spy.changes['20d'], 3);
+  assert.equal(context.result.instruments.spy.source, 'yahoo-chart-v8-adjusted');
+  assert.equal(context.result.instruments.spy.priceMode, 'adjusted-close');
+  assert.equal(context.result.availability.coveragePct, 67);
+  assert.equal(context.result.meta.source, 'Yahoo Finance');
+  assert.equal(context.result.meta.inputs.spy, 'yahoo-chart-v8-adjusted');
+  assert.equal(context.result.meta.official, false);
+  assert.equal(context.result.meta.bestEffort, true);
+  assert.equal(context.result.meta.cache, 'hit');
+  assert.equal(context.result.meta.cacheTier, 'partial');
+  assert.equal(context.result.meta.cacheAgeMs, 1234);
+  assert.equal(context.result.meta.refreshRequested, true);
+  assert.equal(context.result.meta.refreshSuppressed, true);
+  assert.deepEqual(Array.from(context.result.reasons), ['VIX上昇', '株価の弱含み']);
+  context.gapInstrument = { trail: [{ date: '2026-07-20', value: 20 }, { date: '2026-07-21', value: null }, { date: '2026-07-22', value: 22 }] };
+  vm.runInNewContext("gap=normalizeRegimeInstrument(gapInstrument,'vix');", context);
+  assert.equal(context.gap.trail.length, 3);
+  assert.equal(context.gap.trail[1].date, '2026-07-21');
+  assert.equal(context.gap.trail[1].relativePct, null);
+  context.payload.regime.state = 'certain-crash';
+  vm.runInNewContext('invalid=normalizeMarketRegimePayload(payload);', context);
+  assert.equal(context.invalid.label, 'unavailable');
+
+  context.legacyPayload = {
+    status: 'partial', partial: true, asOf: '2026-07-25',
+    regime: { state: 'watch_only', label: 'WATCH ONLY', observedState: 'caution', observedLabel: '警戒', score: 42, confidence: 25, rationale: ['同一営業日の参考判定'], decisionEligible: false },
+    indicators: {
+      vix: { symbol: '^VIX', level: 27, changesPct: { '1d': 4, '5d': 7, '20d': 15 }, available: true },
+      wti: { symbol: 'CL=F', level: 70, changesPct: { '1d': -1, '5d': 2, '20d': 3 }, available: true },
+      spy: { symbol: 'SPY', level: 620, changesPct: { '1d': -2, '5d': -3, '20d': 1 }, available: true }
+    },
+    availability: { history: { complete: true }, synchronizedConfirmedSession: { current: true }, adjustedClose: { available: false } },
+    meta: { quality: { coveragePct: 100 }, observationStale: false, source: { id: 'yahoo-chart' } }
+  };
+  vm.runInNewContext('legacy=normalizeMarketRegimePayload(legacyPayload);', context);
+  assert.equal(context.legacy.label, 'caution');
+  assert.equal(context.legacy.labelText, '警戒');
+  assert.equal(context.legacy.riskScore, 58);
+  assert.equal(context.legacy.instruments.vix.value, 27);
+  assert.equal(context.legacy.instruments.vix.changes['20d'], 15);
+  assert.equal(context.legacy.availability.coveragePct, 100);
+  assert.equal(context.legacy.referenceOnly, true);
+  assert.equal(context.legacy.meta.source, 'yahoo-chart');
+  assert.deepEqual(Array.from(context.legacy.reasons), ['同一営業日の参考判定']);
+
+  context.confirmedPayload = {
+    status: 'ok', partial: false, asOf: '2026-07-25',
+    regime: { state: 'neutral', label: '中立', optimismScore: 52, riskScore: 48, confidence: 100, assessmentStatus: 'confirmed', referenceOnly: false, watchOnly: false, decisionEligible: false, tradeEligible: true },
+    instruments: {
+      vix: { level: 17, available: true, status: 'ok' },
+      wti: { level: 72, available: true, status: 'ok' },
+      spy: { level: 620, available: true, status: 'ok', source: 'yahoo-chart-v8-adjusted', priceMode: 'adjusted-close' }
+    },
+    availability: { history: { complete: true }, synchronizedConfirmedSession: { current: true }, adjustedClose: { available: true } },
+    meta: { quality: { coveragePct: 100 }, source: { provider: 'Yahoo Finance' } },
+    tradeEligible: true
+  };
+  vm.runInNewContext('confirmed=normalizeMarketRegimePayload(confirmedPayload);', context);
+  assert.equal(context.confirmed.watchOnly, false);
+  assert.equal(context.confirmed.referenceOnly, false);
+  assert.equal(context.confirmed.tradeEligible, false);
+});
+
+test('market regime panel is first in the market tab, mobile-safe and not color-only', () => {
+  const marketRender = functionBlock('renderMkt', 'addWatch');
+  assert.ok(marketRender.indexOf('renderMarketRegimePanel()') < marketRender.indexOf('renderIntelligenceOSPanel()'));
+  assert.match(html, /id="market-risk-regime"/);
+  assert.match(html, /MARKET RISK REGIME/);
+  assert.match(html, /VIX・WTI原油・SPYの日次確定終値を複合監視/);
+  assert.match(html, /WATCH ONLY \/ \$\{quality\}/);
+  assert.match(html, /市場レジームを取得できませんでした[\s\S]*?再試行/);
+  assert.match(html, /\.regime-instrument\{[^}]*grid-template-columns:minmax\(54px/);
+  assert.match(html, /@media\(max-width:360px\)\{[\s\S]*?\.regime-instrument\{grid-template-columns:45px 54px repeat\(3,minmax\(38px,1fr\)\)/);
+  assert.match(html, /aria-label="\$\{period\.toUpperCase\(\)\} \$\{word\}/);
+  assert.match(html, /VIX 実線/);
+  assert.match(html, /WTI 破線/);
+  assert.match(html, /SPY 点線/);
+  assert.match(html, /role="img" aria-labelledby="regime-pulse-title regime-pulse-desc"/);
+  const panelSource = functionBlock('renderMarketRegimePanel', 'intelligenceRrgPromptContexts');
+  assert.match(panelSource, /MarketRegime\.riskScore==null\?'N\/A':MarketRegime\.riskScore\.toFixed\(0\)/);
+  assert.match(panelSource, /MarketRegime\.optimismScore==null\?'N\/A':MarketRegime\.optimismScore\.toFixed\(0\)/);
+  assert.match(panelSource, /データ品質/);
+  assert.match(panelSource, /最新確定終値/);
+  assert.match(panelSource, /CONTEXT ONLY \/ \$\{quality\}/);
+  assert.match(panelSource, /モデル指数（確率・期待リターンではない）/);
+  assert.match(panelSource, /\$\{sourceBase\}（非公式\$\{MarketRegime\.meta\.bestEffort===true\?'・best effort':''\}）/);
+  assert.match(readme, /riskScore` \/ `optimismScore`[\s\S]*?暴落確率・上昇確率・期待リターンではありません/);
+  assert.match(functionBlock('marketRegimeInstrumentRow', 'marketRegimePulseChart'), /row\?\.key==='vix'\?row\?\.changesPoints/);
+  assert.match(html, /change20dPoints:key==='vix'\?row\.changesPoints/);
+});
+
+test('market regime pulse uses one confirmed-session axis and breaks paths at missing observations', () => {
+  const source = functionBlock('marketRegimePulseChart', 'marketRegimePromptContext');
+  const dates = ['2026-07-20', '2026-07-21', '2026-07-22', '2026-07-23', '2026-07-24'];
+  const points = values => dates.map((date, index) => ({ date, relativePct: values[index] }));
+  const context = {
+    MarketRegime: { instruments: {
+      vix: { trail: points([0, 1, null, 2, 3]) },
+      wti: { trail: points([0, 1, 2, 3, 4]) },
+      spy: { trail: points([0, null, 2, 3, 4]) }
+    } },
+    esc: value => String(value)
+  };
+  vm.runInNewContext(`${source}; result=marketRegimePulseChart();`, context);
+  const paths = [...context.result.matchAll(/<path class="(vix|wti|spy)" d="([^"]+)"/g)].map(match => ({ key: match[1], d: match[2] }));
+  const vixPaths = paths.filter(path => path.key === 'vix');
+  const wtiPath = paths.find(path => path.key === 'wti');
+  assert.equal(vixPaths.length, 2);
+  assert.match(vixPaths[0].d, /^M18\.0,[\d.]+ L89\.0,/);
+  assert.match(vixPaths[1].d, /^M231\.0,/);
+  assert.doesNotMatch(vixPaths[0].d, /231\.0/);
+  assert.match(wtiPath.d, /L231\.0,/);
+  assert.match(context.result, /全系列を同じ確定営業日の日付軸/);
+  assert.match(context.result, /欠損日は線を分割し、補間や直線接続をしません/);
+});
+
+test('market regime cache, fetch and AI context fail closed for stale or partial observations', () => {
+  assert.equal((html.match(/fetch\(base\+path/g) || []).length, 1);
+  assert.match(html, /const MARKET_REGIME_CACHE='uscmd_market_regime_v1'/);
+  assert.match(html, /store\.get\(MARKET_REGIME_CACHE\)/);
+  assert.match(html, /store\.set\(MARKET_REGIME_CACHE,JSON\.stringify\(data\)\)/);
+  const decisionSource = functionBlock('marketRegimeIsStale', 'marketRegimeDecisionUsable') + functionBlock('marketRegimeDecisionUsable', 'adoptMarketRegimePayload');
+  const context = {
+    Date,
+    MARKET_REGIME_LABELS: { danger: '危険', caution: '警戒', neutral: '中立', optimistic: '楽観' },
+    MarketRegime: { status: 'ready', sourceStatus: 'ok', asOf: new Date().toISOString(), updatedAt: '', label: 'danger', fromCache: false, watchOnly: false, referenceOnly: false, availability: { stale: false, partial: false }, meta: { stale: false } }
+  };
+  vm.runInNewContext(`${decisionSource}; live=marketRegimeDecisionUsable(); MarketRegime.fromCache=true; cached=marketRegimeDecisionUsable(); MarketRegime.fromCache=false; MarketRegime.availability.partial=true; partial=marketRegimeDecisionUsable();`, context);
+  assert.equal(context.live, true);
+  assert.equal(context.cached, false);
+  assert.equal(context.partial, false);
+  const aiSource = functionBlock('marketRegimePromptContext', 'renderMarketRegimePanel') + functionBlock('requestIntelligenceAnalysis', 'intelligenceCategoryName') + functionBlock('analyzeTheme', 'themeLeaderRows');
+  assert.match(aiSource, /VIXはSPXオプション由来の約30日予想変動率で株価方向の予測ではない/);
+  assert.match(aiSource, /原油上昇または下落だけで危険・楽観を断定しない/);
+  assert.match(aiSource, /CL=Fは期近先物/);
+  assert.match(aiSource, /売買助言・発注条件ではない/);
+  assert.match(aiSource, /partial\/stale\/watch-only\/reference-only\/N\/A/);
+  assert.match(aiSource, /source:row\.source\|\|MarketRegime\.meta\.inputs/);
+  assert.match(aiSource, /priceMode:row\.priceMode\|\|null/);
+  assert.match(aiSource, /scoreSemantics:'complementary heuristic model indices; not probabilities or expected returns'/);
+  assert.match(aiSource, /暴落確率・上昇確率・期待リターンではない/);
+  assert.match(aiSource, /provenance:\{provider:MarketRegime\.meta\.source\|\|null,official:MarketRegime\.meta\.official,bestEffort:MarketRegime\.meta\.bestEffort,inputs:MarketRegime\.meta\.inputs\|\|\{\}\}/);
+  assert.match(aiSource, /非公式な単一ソースをbest effortで利用/);
+});
+
+test('market regime wins the Render cold-start queue and refreshes only after fifteen minutes', () => {
+  const macroInit = functionBlock('marketRegimeInit', 'fetchMarketRegime');
+  const intelligenceInit = functionBlock('intelligenceInit', 'fetchIntelligence');
+  const macroDelay = Number(macroInit.match(/setTimeout\(\(\)=>fetchMarketRegime\(true,false\),(\d+)\)/)?.[1]);
+  const intelligenceDelay = Number(intelligenceInit.match(/setTimeout\(\(\)=>fetchIntelligence\(true\),(\d+)\)/)?.[1]);
+  assert.equal(macroDelay, 15);
+  assert.equal(intelligenceDelay, 45);
+  assert.ok(macroDelay < intelligenceDelay);
+  assert.match(html, /function refreshMarketRegimeIfAged\(\)\{[\s\S]*?15\*60\*1000/);
+  assert.match(html, /if\(t==='mkt'\)refreshMarketRegimeIfAged\(\)/);
+  assert.match(html, /visibilitychange[\s\S]*?else refreshMarketRegimeIfAged\(\)/);
+  assert.match(functionBlock('fetchMarketRegime', 'refreshMarketRegimeIfAged'), /finally\{clearTimeout\(timer\);MarketRegime\.loading=false;renderHUD\(\)/);
+});
+
+test('global data sync updates VIX and WTI with the same manual action as stocks and FX', () => {
+  assert.match(html, /id="syncbtn"[^>]+title="株価・為替・VIX・WTI原油を同期"[^>]+aria-label="株価・為替・VIX・WTI原油を同期"/);
+  const fetchSource = functionBlock('fetchMarketRegime', 'marketRegimeSyncSnapshot');
+  const syncSource = functionBlock('runBotSync', 'botSync');
+  const panelSource = functionBlock('renderMarketRegimePanel', 'intelligenceRrgPromptContexts');
+  const connectionSource = functionBlock('syncMarketRegimeText', 'renderLog');
+  assert.match(fetchSource, /forceRefresh===true\?'\?refresh=1':''/);
+  assert.match(syncSource, /const regimeRefresh=fetchMarketRegime\(true,!auto\)/);
+  assert.match(syncSource, /await regimeRefresh/);
+  assert.match(syncSource, /marketRegime=marketRegimeSyncSnapshot\(!auto\)/);
+  assert.match(syncSource, /marketRegimeAnyCurrent=\['ready','partial'\]\.includes[^;]+cache!=='stale-fallback'/);
+  assert.match(syncSource, /anySuccess=[^;]+marketRegimeAnyCurrent/);
+  assert.match(syncSource, /marketRegimeIncomplete/);
+  assert.match(syncSource, /marketRegime,batchErrors/);
+  assert.match(panelSource, /fetchMarketRegime\(false,true\)/);
+  assert.match(connectionSource, /VIX \/ WTI: \$\{esc\(syncMarketRegimeText\(st\)\)\}/);
+  assert.match(connectionSource, /短時間内の再操作/);
+  assert.match(connectionSource, /休場中や新しい終値の確定前/);
+  assert.match(html, /株価・USD\/JPY・VIX・WTI 同期中/);
+});
+
+test('market regime requests share work and queue exactly one manual force behind a normal refresh', async () => {
+  const start = html.indexOf('let marketRegimePromise=');
+  const end = html.indexOf('async function runMarketRegimeFetch(', start);
+  assert.ok(start >= 0 && end > start);
+  const calls = [];
+  const context = {
+    runMarketRegimeFetch(silent, force) {
+      let resolve;
+      const promise = new Promise(done => { resolve = done; });
+      calls.push({ silent, force, resolve });
+      return promise;
+    }
+  };
+  vm.runInNewContext(html.slice(start, end), context);
+  const normal1 = context.fetchMarketRegime(true, false);
+  const normal2 = context.fetchMarketRegime(true, false);
+  const queuedForce1 = context.fetchMarketRegime(true, true);
+  const queuedForce2 = context.fetchMarketRegime(false, true);
+  assert.equal(normal1, normal2);
+  assert.equal(queuedForce1, queuedForce2);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].force, false);
+  calls[0].resolve(true);
+  await normal1;
+  await Promise.resolve();
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].force, true);
+  const activeForce1 = context.fetchMarketRegime(true, true);
+  const activeForce2 = context.fetchMarketRegime(false, true);
+  const normalDuringForce = context.fetchMarketRegime(true, false);
+  assert.equal(activeForce1, activeForce2);
+  assert.equal(activeForce1, normalDuringForce);
+  calls[1].resolve(true);
+  await Promise.all([queuedForce1, activeForce1]);
+  assert.equal(calls.length, 2);
+});
+
+test('AI analyses pin the market regime revision, reject legacy context and fail closed after it changes', () => {
+  const helper = functionBlock('marketRegimeAnalysisIsOld', 'intelligenceAnalysisIsOld');
+  const context = { MarketRegime: { status: 'ready', label: 'neutral', dataRevision: 'macro-r2', asOf: '2026-07-25' } };
+  vm.runInNewContext(`${helper}; legacyReady=marketRegimeAnalysisIsOld({marketRegimeContextIncluded:false}); MarketRegime.status='idle'; MarketRegime.label=''; MarketRegime.dataRevision=''; idleLegacy=marketRegimeAnalysisIsOld({concl:'attack'}); Object.assign(MarketRegime,{status:'ready',label:'neutral',dataRevision:'macro-r2'}); same=marketRegimeAnalysisIsOld({marketRegimeContextIncluded:true,marketRegimeRevision:'macro-r2',marketRegimeAsOf:'2026-07-25'}); changed=marketRegimeAnalysisIsOld({marketRegimeContextIncluded:true,marketRegimeRevision:'macro-r1',marketRegimeAsOf:'2026-07-24'}); MarketRegime.status='error'; unavailable=marketRegimeAnalysisIsOld({marketRegimeContextIncluded:true,marketRegimeRevision:'macro-r2'}); MarketRegime.dataRevision=''; missingCurrent=marketRegimeAnalysisIsOld({marketRegimeContextIncluded:true,marketRegimeRevision:'macro-r2'});`, context);
+  assert.equal(context.legacyReady, true);
+  assert.equal(context.idleLegacy, true);
+  assert.equal(context.same, false);
+  assert.equal(context.changed, true);
+  assert.equal(context.unavailable, true);
+  assert.equal(context.missingCurrent, true);
+
+  const intelligenceRequest = functionBlock('requestIntelligenceAnalysis', 'intelligenceCategoryName');
+  const themeRequest = functionBlock('analyzeTheme', 'themeLeaderRows');
+  assert.match(intelligenceRequest, /marketRegimeRevisionAtRequest=safeText\(MarketRegime\.dataRevision,96\)/);
+  assert.match(intelligenceRequest, /marketRegimeRevision:marketRegimeRevisionAtRequest/);
+  assert.match(themeRequest, /marketRegimeContextAtRequest=marketRegimePromptContext\(\),marketRegimeRevisionAtRequest=/);
+  assert.match(themeRequest, /marketRegimeRevision:marketRegimeRevisionAtRequest/);
+  assert.match(html, /MarketRegime\.promptRevision=safeText\(MarketRegime\.dataRevision,96\)/);
+  assert.match(html, /marketRegimeRevision:safeText\(MarketRegime\.promptRevision,96\)/);
+  assert.match(html, /marketRegimeContextIncluded:true/);
+  assert.match(html, /marketRegimeContextIncluded:rm\.marketRegimeContextIncluded===true/);
+  assert.match(html, /marketRegimeRevision:safeText\(a\.marketRegimeRevision,96\)/);
+});
+
+test('stale macro AI cannot drive the HUD verdict alerts or rank actions', () => {
+  const calcSource = functionBlock('calc', 'renderHUD');
+  const hudSource = functionBlock('renderHUD', 'renderOps');
+  const rankSource = functionBlock('rankDo', 'normalizeRegimeInstrument');
+  assert.match(calcSource, /aiMarketCurrent=S\.ai\?\.market&&!marketRegimeAnalysisIsOld\(S\.ai\.market\)\?S\.ai\.market:null/);
+  assert.match(calcSource, /const concl=aiMarketCurrent\?\.concl/);
+  assert.doesNotMatch(calcSource, /const concl=S\.ai\?\.market\?\.concl/);
+  assert.match(hudSource, /\.\.\.\(aiMarketCurrent\?\.alerts\|\|\[\]\)/);
+  assert.match(rankSource, /if\(marketRegimeAnalysisIsOld\(S\.ai\?\.market\)\)return toast/);
+  assert.match(html, /macroAnalysisOld\?'disabled aria-disabled="true"'/);
+  assert.match(html, /VIX・WTI・SPYレジームはリスクコメント専用/);
+  assert.match(html, /Trade Gateや自動発注へ接続しない/);
+});
+
+test('position AI advice cannot change stop or take prices after the macro revision changes', () => {
+  const source = functionBlock('adoptAdvice', 'renderAI');
+  const position = { id: 'p1', ticker: 'NVDA', stopPx: 90, takePx: 130, aiAdvice: { stopPx: 100, takePx: 150, marketRegimeContextIncluded: true, marketRegimeRevision: 'old' } };
+  const context = {
+    S: { positions: [position] },
+    marketRegimeAnalysisIsOld: () => true,
+    toast: message => { context.message = message; },
+    beep: () => {}, save: () => {}, renderAll: () => {}, shisa: () => {}
+  };
+  vm.runInNewContext(`${source}; adoptAdvice('p1');`, context);
+  assert.equal(position.stopPx, 90);
+  assert.equal(position.takePx, 130);
+  assert.match(context.message, /再分析/);
+  assert.match(html, /aiAdvice:ad\?\{[\s\S]*?marketRegimeRevision:safeText\(ad\.marketRegimeRevision,96\)/);
+  assert.match(html, /p\.aiAdvice=\{[\s\S]*?marketRegimeRevision:safeText\(MarketRegime\.promptRevision,96\)/);
+  assert.match(html, /adviceOld\?'disabled aria-disabled="true"'/);
+  assert.match(html, /AI提案\$\{adviceOld\?'（旧市場レジーム・履歴のみ）'/);
+});
+
+test('partial VIX or SPY observations remain visible while the regime itself is unavailable', () => {
+  const adoptSource = functionBlock('adoptMarketRegimePayload', 'marketRegimeInit');
+  const context = {
+    MarketRegime: { instruments: {}, availability: {}, meta: {} },
+    Object
+  };
+  context.data = {
+    status: 'unavailable', asOf: '2026-07-25', updatedAt: '2026-07-26', dataRevision: 'macro-partial',
+    label: 'unavailable', labelText: '判定不能', riskScore: null, optimismScore: null, confidence: 20,
+    reasons: [], warnings: ['WTI欠損'],
+    instruments: { vix: { value: 22 }, wti: { value: null }, spy: { value: 620 } },
+    referenceOnly: true, watchOnly: true, tradeEligible: false, methodology: {}, availability: { partial: true }, meta: {}
+  };
+  vm.runInNewContext(`${adoptSource}; adoptMarketRegimePayload(data,false); result={status:MarketRegime.status,label:MarketRegime.label,vix:MarketRegime.instruments.vix.value};`, context);
+  assert.equal(context.result.status, 'partial');
+  assert.equal(context.result.label, 'unavailable');
+  assert.equal(context.result.vix, 22);
+  const fetchSource = functionBlock('fetchMarketRegime', 'refreshMarketRegimeIfAged');
+  assert.doesNotMatch(fetchSource, /data\.label==='unavailable'\|\|/);
+  assert.match(fetchSource, /if\(!Object\.values\(data\.instruments\)\.some\(row=>row\.value!=null\)\)throw/);
+  const panelSource = functionBlock('renderMarketRegimePanel', 'intelligenceRrgPromptContexts');
+  assert.match(panelSource, /MarketRegime\.labelText\|\|MARKET_REGIME_LABELS/);
+  assert.match(panelSource, /MarketRegime\.riskScore==null\?'N\/A'/);
+});
+
+test('buy signal lab has a dedicated accessible six-item tab and mobile-safe controls', () => {
+  assert.match(html, /<section class="tab" id="tab-buy" role="tabpanel" aria-labelledby="nav-buy" tabindex="0" hidden>/);
+  assert.match(html, /id="nav-buy" data-tab="buy"[^>]*aria-controls="tab-buy"[\s\S]*?>買い<\/button>/);
+  assert.match(html, /#nav\{[^}]*grid-template-columns:repeat\(6,1fr\)/);
+  assert.match(html, /const renders=\{ops:renderOps,pos:renderPos,ai:renderAI,mkt:renderMkt,buy:renderBuy,log:renderLog\}/);
+  assert.match(functionBlock('switchTab', 'renderAll'), /if\(t==='buy'\)buySignalsInit\(\)/);
+  assert.match(html, /\['ArrowLeft','ArrowRight','Home','End'\]/);
+  assert.match(html, /@media\(max-width:520px\)\{[\s\S]*\.buy-actions\{grid-template-columns:1fr\}/);
+  assert.match(html, /#tab-buy \.buy-summary,#tab-buy \.buy-list\{grid-column:1\/-1\}/);
+});
+
+test('buy signal request uses at most twenty unique local symbols and marks device context unverified', () => {
+  const source = functionBlock('buySignalSymbols', 'buySignalValueText');
+  const now = new Date().toISOString();
+  const positions = Array.from({ length: 12 }, (_, index) => ({
+    ticker: `P${index}`, shares: index + 1, avgCost: 10, price: 12, currency: 'USD', role: 'trade', stopPx: 9, takePx: 16,
+    syncedAt: now, priceSource: 'api', freshness: 'live', stale: false
+  }));
+  const state = {
+    settings: { usdJpy: 150, fxSource: 'api', fxFreshness: 'live', fxRetrievedAt: now, fxStale: false },
+    cash: { jpy: 100000, usd: 1000 },
+    positions,
+    watch: ['P0', ...Array.from({ length: 12 }, (_, index) => `W${index}`)],
+    shadow: [{ t: 'W0' }, { t: 'SHADOW' }],
+    events: [{ ticker: 'P0', date: '2026-08-01', label: '<決算>' }],
+    news: [{ t: 'P0', h: '<script>alert(1)</script>', src: 'device', at: '2026-07-30' }]
+  };
+  const context = {
+    S: state,
+    normalizeTicker: value => String(value || '').trim().toUpperCase().replace(/\s+/g, ''),
+    TICKER_RE: /^[A-Z0-9^][A-Z0-9.^=\/-]{0,19}$/,
+    safeText: (value, max = 1000) => String(value ?? '').slice(0, max),
+    safeStrings: (value, maxItems = 100, maxLen = 500) => Array.isArray(value) ? value.slice(0, maxItems).map(item => String(item ?? '').slice(0, maxLen)) : []
+  };
+  vm.runInNewContext(`${source}; result=buySignalRequestPayload(S);`, context);
+  const payload = JSON.parse(JSON.stringify(context.result));
+  assert.equal(payload.mode, 'SIMULATE');
+  assert.equal(payload.symbols.length, 20);
+  assert.equal(new Set(payload.symbols).size, 20);
+  assert.deepEqual(payload.symbols.slice(0, 3), ['P0', 'P1', 'P2']);
+  assert.equal(payload.account.mode, 'SIMULATE');
+  for (const key of ['equityJpy', 'cashJpy', 'usdJpy', 'riskBudgetJpy', 'existingOpenRiskJpy', 'existingTickerValueJpy', 'maxPositionPct', 'slippageBufferPct']) assert.equal(typeof payload.account[key], 'number', `${key} should be numeric`);
+  assert.equal(payload.account.inputComplete, true);
+  assert.deepEqual(payload.account.warnings, []);
+  assert.equal(payload.context.verified, false);
+  assert.equal(payload.context.source, 'device-local-unverified');
+  assert.equal(payload.context.events[0].verification, 'unverified');
+  assert.equal(payload.context.news[0].verification, 'unverified');
+  assert.equal(payload.positions.length, 12);
+
+  const missing = JSON.parse(JSON.stringify(state));
+  missing.positions[0].price = null;
+  missing.positions[0].stopPx = null;
+  context.S = missing;
+  vm.runInNewContext('missingResult=buySignalRequestPayload(S);', context);
+  const missingPayload = JSON.parse(JSON.stringify(context.missingResult));
+  assert.equal(missingPayload.positions.some(position => position.symbol === 'P0'), false);
+  assert.match(missingPayload.account.warnings.join(' '), /P0.*現在値.*STOP/);
+  assert.equal(missingPayload.account.existingOpenRiskJpy > 0, true);
+
+  missing.settings.fxSource = 'manual';
+  context.S = missing;
+  vm.runInNewContext('missingFx=buySignalRequestPayload(S);', context);
+  assert.equal(Object.hasOwn(context.missingFx.account, 'usdJpy'), false);
+  assert.equal(Object.hasOwn(context.missingFx.account, 'riskBudgetJpy'), false);
+  assert.equal(context.missingFx.positions.length, 0);
+  assert.match(context.missingFx.account.warnings[0], /USD\/JPY/);
+});
+
+test('buy signal response is fail-closed and always exposes exactly eight checks', () => {
+  const source = functionBlock('buySignalValueText', 'buySignalStatusLabel');
+  const signalDefinitions = [
+    { key: 'rsiRecovery', label: 'RSI売られ過ぎ反転' }, { key: 'macdGoldenCross', label: 'MACDゴールデンクロス' },
+    { key: 'ema20Recovery', label: 'EMA20回復' }, { key: 'ema50Recovery', label: 'EMA50回復' },
+    { key: 'volumeExpansion', label: '出来高拡大' }, { key: 'supportBounce', label: '支持帯反発' },
+    { key: 'themeStrength', label: 'テーマ強度' }, { key: 'fundamentalNews', label: '決算・材料' }
+  ];
+  const now = new Date().toISOString().slice(0, 10);
+  const context = {
+    BUY_SIGNAL_DEFINITIONS: signalDefinitions,
+    BUY_SIGNAL_DEFAULTS: signalDefinitions.map(row => row.label),
+    safeText: (value, max = 1000) => String(value ?? '').slice(0, max),
+    normalizeTicker: value => String(value || '').trim().toUpperCase().replace(/\s+/g, ''),
+    TICKER_RE: /^[A-Z0-9^][A-Z0-9.^=\/-]{0,19}$/,
+    buySignalTimestampFresh: value => /^\d{4}-\d{2}-\d{2}/.test(String(value || ''))
+  };
+  context.payload = {
+    status: 'ok',
+    asOf: now,
+    execution: { mode: 'SIMULATE', autoOrder: false, tradingConnected: false },
+    results: [{
+      ticker: 'NVDA', status: 'ok', dataStatus: 'ok', available: true, active: true, asOf: now, price: 190, score: 91, decision: 'BUY_CANDIDATE',
+      signals: signalDefinitions.map((definition, index) => ({
+        ...definition,
+        available: definition.key !== 'supportBounce',
+        passed: definition.key !== 'supportBounce' && index < 6,
+        value: definition.key === 'supportBounce' ? null : index,
+        reason: definition.key === 'supportBounce' ? 'Volume Profile未接続のためunavailable' : ''
+      })),
+      indicators: {
+        daily: { available: true, asOf: now, price: 190, rsi14: 58, macd: { line: 2, signal: 1, histogram: 1 }, ema20: 180, ema50: 170, ema200: 140, rvol20: 1.4 },
+        weekly: { available: true, asOf: now, price: 190, rsi14: 61, macd: { line: 3, signal: 2, histogram: 1 }, ema20: 160, ema50: 140, ema200: 100, rvol20: 1.2 }
+      },
+      theme: { name: '<AI>' }, leveragedProduct: false, leverageBlocked: false,
+      riskReward: { ratio: 2.5, passed: true }, positionPlan: { amountJpy: 100000, shares: 3, entry: 190, stop: 180, take: 215 },
+      fundamental: { earningsDays: 20 }, quality: { status: 'verified', priceMode: 'adjusted', adjusted: true, sufficient: true, stale: false }, warnings: ['<注意>'], provenance: { price: 'provider' }
+    }]
+  };
+  vm.runInNewContext(`${source}; ready=normalizeBuySignalResponse(payload,['NVDA']); partial=normalizeBuySignalResponse({...payload,status:'partial'}); stale=normalizeBuySignalResponse({...payload,results:[{...payload.results[0],status:'stale',stale:true}]}); rrFailed=normalizeBuySignalResponse({...payload,results:[{...payload.results[0],riskReward:{ratio:1.2,passed:false}}]}); technical=normalizeBuySignalResult({...payload.results[0],status:undefined,indicators:undefined,dataStatus:'ok',technical:payload.results[0].indicators}); missingKey=normalizeBuySignalResponse({...payload,results:[{...payload.results[0],signals:payload.results[0].signals.slice(0,7)}]},['NVDA']); duplicateKey=normalizeBuySignalResponse({...payload,results:[{...payload.results[0],signals:[...payload.results[0].signals.slice(0,7),payload.results[0].signals[0]]}]},['NVDA']); bad=false;try{normalizeBuySignalResponse({...payload,execution:{mode:'LIVE',autoOrder:true,tradingConnected:true}})}catch(e){bad=true}`, context);
+  assert.equal(context.ready.status, 'ready');
+  assert.equal(context.ready.results[0].usable, true);
+  assert.equal(context.ready.results[0].signals.length, 8);
+  assert.equal(context.ready.results[0].signals[1].available, true);
+  assert.equal(context.ready.results[0].signals[5].available, false);
+  assert.equal(context.ready.results[0].signalContractValid, true);
+  assert.equal(context.ready.results[0].indicators.daily.status, 'ready');
+  assert.match(context.ready.results[0].indicators.daily.ema, /20 180/);
+  assert.equal(context.ready.results[0].indicators.daily.rvol, 1.4);
+  assert.equal(context.technical.status, 'ready');
+  assert.equal(context.technical.indicators.weekly.rvol, 1.2);
+  assert.equal(context.rrFailed.results[0].riskReward.blocked, true);
+  assert.equal(context.rrFailed.results[0].riskReward.eligible, false);
+  assert.equal(context.partial.results[0].usable, true);
+  assert.equal(context.stale.results[0].usable, false);
+  assert.equal(context.missingKey.results[0].usable, false);
+  assert.equal(context.duplicateKey.results[0].usable, false);
+  assert.equal(context.bad, true);
+  assert.equal(context.ready.execution.autoOrder, false);
+  assert.equal(context.ready.execution.tradingConnected, false);
+});
+
+test('buy signal UI separates daily and weekly evidence, shows restrictions and never exposes an order action', () => {
+  const cardSource = functionBlock('buySignalCard', 'addBuySignalShadow');
+  const fetchSource = functionBlock('fetchBuySignals', 'renderBuy');
+  const renderSource = functionBlock('renderBuy', 'renderMkt');
+  assert.match(cardSource, /buySignalIndicatorHtml\(result\.indicators\.daily,'日足'\)/);
+  assert.match(cardSource, /buySignalIndicatorHtml\(result\.indicators\.weekly,'週足'\)/);
+  assert.match(cardSource, /8信号チェックリスト/);
+  assert.match(cardSource, /レバレッジ制限/);
+  assert.match(cardSource, /高値追い制限/);
+  assert.match(cardSource, /決算接近制限/);
+  assert.match(cardSource, /RR \$\{esc\(rr\)\}/);
+  assert.match(html, /\.buy-card\.strong/);
+  assert.match(html, /\.buy-card\.buy/);
+  assert.match(html, /\.buy-card\.check/);
+  assert.match(html, /\.buy-card\.wait/);
+  assert.match(html, /\.buy-card\.avoid/);
+  assert.match(cardSource, /decisionMeta=buySignalDecisionMeta\(safeDecision\)/);
+  assert.match(cardSource, /\$\{!eligible\|\|shadowed\?'disabled aria-disabled="true"':''\}/);
+  assert.equal((cardSource.match(/<button /g) || []).length, 3);
+  assert.match(cardSource, />SHADOW追加<\/button>/);
+  assert.match(cardSource, />監視追加<\/button>/);
+  assert.match(cardSource, />再分析<\/button>/);
+  assert.doesNotMatch(cardSource, /onclick="[^"]*(?:order|trade)/i);
+  assert.match(fetchSource, /fetch\(base\+'\/api\/buy-signals',\{method:'POST'/);
+  assert.match(fetchSource, /BuySignals\.results=\[\]/);
+  assert.match(fetchSource, /BuySignals\.status='unavailable';BuySignals\.asOf='';BuySignals\.results=\[\]/);
+  assert.match(fetchSource, /buySignalQueuedRefreshPromise=buySignalPromise\.then\(\(\)=>fetchBuySignals\(true\)\)/);
+  assert.match(renderSource, /AUTO ORDER OFF/);
+  assert.match(renderSource, /端末events\/newsはunverified context/);
+  assert.match(renderSource, /status!=='ready'/);
+  const syncSource = functionBlock('runBotSync', 'botSync');
+  assert.ok((syncSource.match(/if\(cur==='buy'\)fetchBuySignals\(true\)/g) || []).length >= 2);
+});
+
+test('buy signal SHADOW is disabled and handler-defended for every hard restriction', () => {
+  const gateAndCardSource = functionBlock('buySignalPrice', 'addBuySignalShadow');
+  const handlerSource = functionBlock('addBuySignalShadow', 'addBuySignalWatch');
+  const base = {
+    symbol: 'NVDA',
+    status: 'ready',
+    stale: false,
+    usable: true,
+    available: true,
+    active: true,
+    activeCount: 8,
+    availableCount: 8,
+    price: 190,
+    score: 90,
+    decision: 'BUY_CANDIDATE',
+    theme: 'AI半導体',
+    earningsDays: 20,
+    earningsBlocked: false,
+    leveragedProduct: false,
+    leverageBlocked: false,
+    chaseBlocked: false,
+    chaseText: '',
+    riskReward: { ratio: 2.2, minimum: 1.8, eligible: true, blocked: false, reason: '' },
+    positionPlan: { amountJpy: 100000, shares: 3, entry: 190, stop: 180, take: 215 },
+    indicators: {
+      daily: { status: 'ready', rsi: 58, macd: 'up', ema: 'bullish', rvol: 1.4 },
+      weekly: { status: 'ready', rsi: 61, macd: 'up', ema: 'bullish', rvol: 1.2 }
+    },
+    signals: [],
+    fundamental: {},
+    quality: {},
+    warnings: [],
+    provenance: []
+  };
+  const context = {
+    BUY_SIGNAL_STATUS: ['ready', 'partial', 'stale', 'unavailable'],
+    BuySignals: { results: [], loading: false, focusKey: '' },
+    S: { positions: [], watch: [], shadow: [] },
+    globalStop: false,
+    calc: () => ({ crits: context.globalStop ? 1 : 0 }),
+    TICKER_RE: /^[A-Z0-9^][A-Z0-9.^=\/-]{0,19}$/,
+    normalizeTicker: value => String(value || '').trim().toUpperCase(),
+    todayStr: () => '2026-07-30',
+    safeText: (value, max = 1000) => String(value ?? '').slice(0, max),
+    esc: value => String(value ?? '').replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]),
+    toast: message => { context.lastToast = message; },
+    uid: () => 'shadow-id',
+    save: () => {},
+    renderAll: () => {},
+    botSync: () => {}
+  };
+  vm.runInNewContext(`${gateAndCardSource};${handlerSource}`, context);
+
+  const blockedCases = [
+    ['leveraged product', { leveragedProduct: true }],
+    ['leverage block', { leverageBlocked: true }],
+    ['chase block', { chaseBlocked: true }],
+    ['earnings within three days', { earningsDays: 3 }],
+    ['risk reward below 1.8', { riskReward: { ratio: 1.79, minimum: 1, eligible: true, blocked: false } }],
+    ['global stop', {}, true],
+    ['non-buy decision', { decision: 'WATCH' }],
+    ['unusable data', { usable: false }],
+    ['inactive result', { active: false }]
+  ];
+  for (const [label, override, globalStop = false] of blockedCases) {
+    const result = { ...base, ...override };
+    context.BuySignals.results = [result];
+    context.S.shadow = [];
+    context.globalStop = globalStop;
+    context.result = result;
+    context.stop = globalStop;
+    vm.runInNewContext('card=buySignalCard(result,0,stop);addBuySignalShadow(0);', context);
+    const shadowButton = context.card.match(/<button[^>]*onclick="addBuySignalShadow\(0\)"[^>]*>/)?.[0] || '';
+    assert.match(shadowButton, /disabled aria-disabled="true"/, `${label} must disable SHADOW`);
+    assert.equal(context.S.shadow.length, 0, `${label} must be rejected again by the handler`);
+  }
+
+  context.BuySignals.results = [{ ...base }];
+  context.S.shadow = [];
+  context.globalStop = false;
+  vm.runInNewContext('addBuySignalShadow(0);', context);
+  assert.equal(context.S.shadow.length, 1);
+  assert.equal(context.S.shadow[0].t, 'NVDA');
+  assert.equal(context.S.shadow[0].a, 'probe');
+});
+
+test('buy signal requests share in-flight work, queue one forced rerun and discard data after failure', async () => {
+  const source = functionBlock('fetchBuySignals', 'renderBuy');
+  const deferred = [];
+  const responseBody = {
+    status: 'ready', asOf: '2026-07-30', results: [{ symbol: 'NVDA' }],
+    execution: { mode: 'SIMULATE', autoOrder: false, tradingConnected: false }
+  };
+  const context = {
+    BuySignals: { initialized: false, loading: false, status: 'idle', asOf: '', results: [{ symbol: 'OLD' }], error: '', execution: {}, focusKey: '' },
+    buySignalRequestPayload: () => ({ mode: 'SIMULATE', refresh: false, symbols: ['NVDA'], account: {}, context: { verified: false } }),
+    document: { activeElement: null },
+    cur: 'buy',
+    renderBuy: () => { context.renders = (context.renders || 0) + 1; },
+    S: { settings: { apiBase: '', apiToken: '' } },
+    AbortController,
+    setTimeout: () => 1,
+    clearTimeout: () => {},
+    safeText: (value, max = 1000) => String(value ?? '').slice(0, max),
+    safeStrings: (value, maxItems = 100, maxLen = 500) => Array.isArray(value) ? value.slice(0, maxItems).map(item => String(item ?? '').slice(0, maxLen)) : [],
+    buySignalInputRevision: payload => JSON.stringify({
+      symbols: payload?.symbols || [],
+      account: payload?.account || {},
+      positions: payload?.positions || [],
+      context: payload?.context || {}
+    }),
+    normalizeBuySignalResponse: body => body,
+    fetch: (url, options) => new Promise(resolve => deferred.push({ url, options, resolve }))
+  };
+  vm.runInNewContext(`let buySignalPromise=null,buySignalPromiseForced=false,buySignalQueuedRefreshPromise=null;${source};p1=fetchBuySignals(false);p2=fetchBuySignals(false);q1=fetchBuySignals(true);q2=fetchBuySignals(true);`, context);
+  assert.equal(context.p1, context.p2);
+  assert.equal(context.q1, context.q2);
+  assert.notEqual(context.p1, context.q1);
+  assert.equal(deferred.length, 1);
+  assert.equal(context.BuySignals.results.length, 0);
+  assert.equal(JSON.parse(deferred[0].options.body).refresh, false);
+  deferred[0].resolve({ ok: true, headers: { get: () => 'application/json' }, json: async () => responseBody });
+  await context.p1;
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(deferred.length, 2);
+  assert.equal(JSON.parse(deferred[1].options.body).refresh, true);
+  deferred[1].resolve({ ok: true, headers: { get: () => 'application/json' }, json: async () => responseBody });
+  await context.q1;
+  assert.equal(context.BuySignals.status, 'ready');
+  assert.equal(context.BuySignals.results[0].symbol, 'NVDA');
+
+  context.fetch = async () => { throw new Error('network down'); };
+  vm.runInNewContext('failed=fetchBuySignals(true);', context);
+  await context.failed;
+  assert.equal(context.BuySignals.status, 'unavailable');
+  assert.equal(context.BuySignals.results.length, 0);
+  assert.match(context.BuySignals.error, /network down/);
 });
