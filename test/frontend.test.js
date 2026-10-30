@@ -553,7 +553,7 @@ test('v13 Market Theme Intelligence OS is reachable, mobile-safe and labels prox
 
 test('v13 detail exposes the API entry enum as a non-order observation label', () => {
   const labelSource = functionBlock('intelligenceEntryLabel', 'intelligenceDetailPanel');
-  const context = { intelligenceDetailPanelBase: () => '<section><div class="intel-gate">gate</div></section>', selectedIntelligenceTheme: () => ({ entry: 'buy' }), esc: value => String(value) };
+  const context = { intelligenceOverlapPanel: () => '', intelligenceDetailPanelBase: () => '<section><div class="intel-gate">gate</div></section>', selectedIntelligenceTheme: () => ({ entry: 'buy' }), esc: value => String(value) };
   vm.runInNewContext(`${labelSource}; labels = ['buy','pullback_only','watch','avoid'].map(intelligenceEntryLabel);`, context);
   assert.deepEqual(Array.from(context.labels), ['買い条件一致', '押し目限定', '監視', '回避']);
   const detailSource = functionBlock('intelligenceDetailPanel', 'renderIntelligenceOSPanel');
@@ -688,7 +688,7 @@ test('v13.1 RRG normalizer keeps 21 unique frames, derives quadrants and rejects
 });
 
 test('v13.1 RRG view exposes four quadrants, 20-day controls, accessible fallback and fixed-scale trails', () => {
-  assert.match(html, /INTELLIGENCE_VIEWS=\['map','rrg','ranking','rotation-up','rotation-down','next'\]/);
+  assert.match(html, /INTELLIGENCE_VIEWS=\['map','rrg','compare','ranking','rotation-up','rotation-down','next'\]/);
   assert.match(html, /rrg:'RRG 4象限'/);
   assert.match(html, /RRG型・価格ローテーション参考図/);
   assert.match(html, /63営業日 SPY対比・対数リターン差/);
