@@ -2401,6 +2401,103 @@ function marketWatchQuoteHtml(q){
   const valid=value=>typeof value==='number'&&Number.isFinite(value),price=valid(q.price)&&q.price>0?'$'+q.price.toFixed(2):'価格N/A',change=valid(q.changePct)?pct(q.changePct):'騰落N/A',cls=!valid(q.changePct)?'mut':q.changePct>=0?'grnc':'redc';
   return`<em class="wq ${cls}" title="${esc(q.src||'api')}・取得 ${esc(fmtAt(q.syncedAt||q.at))}${q.delayed?'・遅延値':''}${q.stale?'・古いデータ':''}">${price} ${change}</em>`;
 }
+/* ---- Movement monitor: ephemeral observations, no independent collector ---- */
+const MovementMonitor={samples:{},issues:{},lastSyncAt:'',requested:[],lastSignals:[],lastGroups:[]};
+function movementDate(at){return new Intl.DateTimeFormat('en-CA',{timeZone:'America/New_York',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(at))}
+function movementValidate(q,now){
+  if(!q)return '価格取得失敗';
+  if(q.observationPairVerified!==true)return '価格と観測時刻の対応が未確認';
+  if(typeof q.price!=='number'||!Number.isFinite(q.price)||q.price<=0)return '価格不正';
+  const at=Date.parse(q.at),retrieved=Date.parse(q.retrievedAt);
+  if(!Number.isFinite(at)||!Number.isFinite(retrieved))return '観測・取得時刻が未確認';
+  if(at>now+5000||retrieved>now+5000||at>retrieved+5000)return '未来時刻・時刻矛盾';
+  if(now-at>120000||now-retrieved>120000)return '2分超の遅延・古い観測';
+  if(q.stale||q.delayed||q.freshness!=='live'||q.cacheState==='stale-fallback')return 'LIVE条件未充足';
+  if(q.marketState!=='open')return '通常時間外・セッション未確認';
+  if(q.currency!=='USD'||typeof q.src!=='string'||!q.src)return '通貨・取得元が未確認';
+  if(q.providerComparison?.status==='divergent')return '取得元間の価格不一致';
+  return '';
+}
+function movementIngest(state,quotes,requested,now,themes=[]){
+  state.requested=[...new Set(requested)].filter(t=>t!=='JMIA'&&/^[A-Z][A-Z0-9.-]{0,14}$/.test(t)).slice(0,250);
+  const scope=new Set([...state.requested,'SPY']);
+  for(const symbol of Object.keys(state.samples))if(!scope.has(symbol))delete state.samples[symbol];
+  state.issues={};state.lastSyncAt=new Date(now).toISOString();
+  for(const symbol of scope){
+    const q=quotes[symbol],issue=movementValidate(q,now);
+    if(issue){state.issues[symbol]=issue;continue}
+    const point={price:q.price,at:q.at,retrievedAt:q.retrievedAt,src:q.src,currency:q.currency,marketState:q.marketState,freshness:q.freshness,observationPairVerified:true,delayed:false,stale:false,day:movementDate(q.at)};
+    let rows=state.samples[symbol]||[];const prev=rows.at(-1);
+    if(prev&&(point.day!==prev.day||point.src!==prev.src||Date.parse(point.at)-Date.parse(prev.at)>20*60000))rows=[];
+    if(rows.length&&Date.parse(point.at)<Date.parse(rows.at(-1).at)){state.issues[symbol]='古い順序の観測';continue}
+    if(rows.length&&point.at===rows.at(-1).at){
+      if(point.price!==rows.at(-1).price){state.samples[symbol]=[];state.issues[symbol]='同時刻の価格訂正・比較再開待ち'}
+      continue;
+    }
+    state.samples[symbol]=[...rows,point].filter(p=>now-Date.parse(p.at)<=25*60000).slice(-64);
+  }
+  const evaluation=movementAnalyze(state,themes,now);
+  state.lastSignals=evaluation.rows.filter(r=>r.rapid||r.againstMarket).map(r=>({...r}));
+  state.lastGroups=evaluation.groups.filter(g=>g.direction).map(g=>({...g,observations:g.members.map(symbol=>({symbol,at:state.samples[symbol].at(-1).at,source:state.samples[symbol].at(-1).src}))}));
+}
+function movementAnalyze(state,themes,now){
+  const rows=state.requested.map(symbol=>{
+    const points=state.samples[symbol]||[],last=points.at(-1),issue=state.issues[symbol]||movementValidate(last,now);
+    if(issue)return{symbol,status:issue};
+    const first=[...points].reverse().find(p=>Date.parse(last.at)-Date.parse(p.at)>=5*60000&&Date.parse(last.at)-Date.parse(p.at)<=20*60000);
+    if(!first)return{symbol,status:'5〜20分差の比較観測待ち',at:last.at,source:last.src};
+    const move=(last.price/first.price-1)*100,minutes=(Date.parse(last.at)-Date.parse(first.at))/60000;
+    const spy=state.samples.SPY||[],nearest=at=>spy.filter(p=>Math.abs(Date.parse(p.at)-Date.parse(at))<=60000).sort((a,b)=>Math.abs(Date.parse(a.at)-Date.parse(at))-Math.abs(Date.parse(b.at)-Date.parse(at)))[0],end=nearest(last.at),start=nearest(first.at);
+    const benchmarkValid=!state.issues.SPY&&end&&start&&!movementValidate(end,now)&&end.src===last.src&&start.src===first.src&&end.day===last.day&&start.day===first.day&&Date.parse(end.at)>Date.parse(start.at);
+    const benchmark=benchmarkValid?(end.price/start.price-1)*100:null;
+    return{symbol,status:'observed',move,minutes,at:last.at,from:first.at,source:last.src,relative:benchmark===null?null:move-benchmark,benchmark,rapid:Math.abs(move)>=2,againstMarket:benchmark!==null&&benchmark<0&&move>0&&move-benchmark>=1};
+  });
+  const groups=(Array.isArray(themes)?themes:[]).map(t=>{
+    const members=[...new Set(t.relatedTickers||[])].filter(s=>s!=='SPY'),eligible=rows.filter(r=>r.status==='observed'&&members.includes(r.symbol));
+    // A whole group must share the observation window and source; no cherry-picked time cluster.
+    const times=eligible.map(r=>Date.parse(r.at)),starts=eligible.map(r=>Date.parse(r.from));
+    const aligned=eligible.length>=3&&Math.max(...times)-Math.min(...times)<=60000&&Math.max(...starts)-Math.min(...starts)<=60000&&new Set(eligible.map(r=>r.source)).size===1;
+    const coverage=members.length?eligible.length/members.length:0,up=eligible.filter(r=>r.move>=1),down=eligible.filter(r=>r.move<=-1);
+    const valid=aligned&&coverage>=.6;
+    return{id:t.id,name:t.name,total:members.length,observed:eligible.length,coverage,up:up.length,down:down.length,direction:valid&&up.length>=3&&up.length/eligible.length>=.7?'up':valid&&down.length>=3&&down.length/eligible.length>=.7?'down':null,members:eligible.map(r=>r.symbol),status:!aligned?'観測時刻・取得元・3銘柄条件待ち':coverage<.6?'テーマ構成の60%未満':'比較可能'};
+  }).filter(t=>t.observed>0);
+  return{rows,groups,observed:rows.filter(r=>r.status==='observed').length};
+}
+function movementPreviousSignals(state,now,current){
+  const active=new Set(current.rows.filter(r=>r.rapid||r.againstMarket).map(r=>r.symbol));
+  return (state.lastSignals||[]).filter(r=>{
+    const age=now-Date.parse(r.at),last=state.samples[r.symbol]?.at(-1);
+    return !active.has(r.symbol)&&!state.issues[r.symbol]&&state.requested.includes(r.symbol)&&last?.at===r.at&&last?.src===r.source&&age>120000&&age<=20*60000;
+  }).map(r=>({...r,ageMinutes:(now-Date.parse(r.at))/60000}));
+}
+function movementPreviousGroups(state,now,current){
+  const active=new Set(current.groups.filter(g=>g.direction).map(g=>g.id));
+  return (state.lastGroups||[]).filter(g=>!active.has(g.id)&&g.observations?.length>=3&&g.observations.every(p=>{
+    const last=state.samples[p.symbol]?.at(-1),age=now-Date.parse(p.at);
+    return !state.issues[p.symbol]&&state.requested.includes(p.symbol)&&last?.at===p.at&&last?.src===p.source&&age>=0&&age<=20*60000;
+  })&&g.observations.some(p=>now-Date.parse(p.at)>120000)).map(g=>({...g,oldestAt:g.observations.map(p=>p.at).sort()[0]}));
+}
+function movementMonitorPanel(){
+  const now=Date.now(),result=movementAnalyze(MovementMonitor,typeof IntelligenceOS==='undefined'?[]:IntelligenceOS.themes,now),previous=movementPreviousSignals(MovementMonitor,now,result),previousGroups=movementPreviousGroups(MovementMonitor,now,result);
+  const num=v=>v==null?'N/A':(v>=0?'+':'')+v.toFixed(2)+'%',alerts=result.rows.filter(r=>r.rapid||r.againstMarket).sort((a,b)=>Math.abs(b.move)-Math.abs(a.move));
+  const groups=result.groups.filter(g=>g.direction),row=r=>`<div class="regime-watch"><b>${esc(r.symbol)}</b> ${r.rapid?'価格変化検出':''}${r.againstMarket?' / 市場逆行':''}<br>${r.minutes.toFixed(1)}分の観測差 ${num(r.move)} / 近接時刻SPY比 ${num(r.relative)}<br>観測 ${esc(fmtAt(r.from))} → ${esc(fmtAt(r.at))} / ${esc(r.source)}<br>原因・ニュースとの関連は未確認。売買推奨ではありません。</div>`;
+  return `<div class="panel" id="movement-monitor"><div class="ptitle">値動きモニター<span class="r">画面を開いている間のみ</span></div>
+  <p>対象 ${MovementMonitor.requested.length}銘柄 / 最新判定可能 ${result.observed}銘柄。前回同期 ${esc(MovementMonitor.lastSyncAt?fmtAt(MovementMonitor.lastSyncAt):'未実施')}。<button class="btn" type="button" onclick="botSync(false)">既存の株価同期を実行</button></p>
+  <div class="regime-watch"><b>稼働範囲</b><br>既存同期で得た通常時間のUSD価格を、このページのメモリ内だけで比較。再読込でリセットされ、アプリ終了・スリープ中は監視できません。設定済み自動同期に従いますが、取得間隔や常時稼働を保証しません。観測から2分を超えた検出は『前回観測・最新未確認』に切り替え、20分で非表示にします。全市場スキャンではありません。<br>時間外：未対応 / 出来高急増：未接続（同時刻の過去出来高が必要） / ニュース照合：未接続</div>
+  ${alerts.map(row).join('')||'<div class="empty">現在の比較可能な観測では条件に一致する動きなし。未取得・比較待ちの銘柄の異変を否定しません。</div>'}
+  ${previous.map(r=>`<div class="regime-watch"><b>${esc(r.symbol)}：前回観測の検出</b><br><strong>最新未確認・現在のシグナルではありません</strong><br>価格観測は ${r.ageMinutes.toFixed(1)}分前（${esc(fmtAt(r.at))}）。${r.minutes.toFixed(1)}分の観測差 ${num(r.move)} / 近接時刻SPY比 ${num(r.relative)}<br>次の同期で更新します。観測から20分経過でこの履歴表示も終了します。</div>`).join('')}
+  ${previousGroups.map(g=>`<div class="regime-watch"><b>${esc(g.name)}：前回観測の同方向変化</b><br><strong>最新未確認・現在のシグナルではありません</strong><br>観測 ${esc(fmtAt(g.oldestAt))} 以降・${g.direction==='up'?'上昇':'下落'} ${g.direction==='up'?g.up:g.down}/${g.observed}銘柄・構成カバー ${(g.coverage*100).toFixed(0)}%<br>次の同期で更新、最古の観測から20分で非表示。資金移動・因果関係は未確認。</div>`).join('')}
+  ${groups.map(g=>`<div class="regime-watch"><b>${esc(g.name)}：同方向の値動き</b><br>${g.direction==='up'?'上昇':'下落'} ${g.direction==='up'?g.up:g.down}/${g.observed}銘柄・構成カバー ${(g.coverage*100).toFixed(0)}%<br>${g.members.map(esc).join(' / ')}<br>共通銘柄はテーマ間で重複します。資金移動や事件との因果関係を証明しません。</div>`).join('')}
+  <details><summary>監視状態・検出条件</summary><p>通常時間・USD・LIVE分類・遅延フラグなし・観測/取得から2分以内を要求。5〜20分の実観測差で±2%以上、またはSPY下落時に自身上昇かつSPY比+1ポイント以上を表示。閾値は未検証の目安です。テーマ同方向は3銘柄以上、構成60%以上、うち70%以上が±1%以上。観測の始点/終点はそれぞれ60秒以内で整合。同日・同取得元のみ比較。</p>${result.rows.map(r=>`<div>${esc(r.symbol)}：${r.status==='observed'?num(r.move)+' / '+r.minutes.toFixed(1)+'分':esc(r.status)}</div>`).join('')||'<p>監視・保有銘柄を登録すると既存の同期対象になります。</p>'}${result.groups.map(g=>`<div>${esc(g.name)}：${esc(g.status)}（${g.observed}/${g.total}銘柄）</div>`).join('')}</details></div>`;
+}
+function movementRefreshPanel(){
+  const panel=document.getElementById('movement-monitor');if(!panel)return;
+  const open=!!panel.querySelector('details')?.open,focused=panel.contains(document.activeElement)?document.activeElement.tagName:null;panel.outerHTML=movementMonitorPanel();
+  const replacement=document.getElementById('movement-monitor'),details=replacement?.querySelector('details');if(details)details.open=open;
+  if(focused==='SUMMARY')replacement?.querySelector('summary')?.focus({preventScroll:true});else if(focused==='BUTTON')replacement?.querySelector('button')?.focus({preventScroll:true});
+}
+/* ---- End movement monitor ---- */
+
 function renderMkt(){
   const ths=[...(S.themes||[])].sort((a,b)=>b.score-a.score);
   const trIcon=t=>t==='up'?'<span class="grnc">▲</span>':t==='down'?'<span class="redc">▼</span>':'<span class="mut">▶</span>';
@@ -2409,6 +2506,7 @@ function renderMkt(){
   const nlist=Object.values(news).sort((a,b)=>new Date(b.at)-new Date(a.at));
   $('#tab-mkt').innerHTML=`
   <nav class="panel market-guide" id="market-guide" aria-label="市場画面のページ内移動"><b>市場のどこを見る？</b><div class="market-jumps"><button type="button" onclick="jumpMarketSection('market-risk-regime')">① 市場リスク</button><button type="button" onclick="jumpMarketSection('theme-intelligence-os')">② テーマ地図</button><button type="button" onclick="jumpMarketSection('theme-tracker')">③ 期間別リターン</button><button type="button" onclick="jumpMarketSection('market-ai-themes')">④ AI評価</button><button type="button" onclick="jumpMarketSection('market-watch-list')">⑤ 監視銘柄</button><button type="button" onclick="jumpMarketSection('market-news-feed')">⑥ ニュース</button></div><p>モデル得点・過去リターン・価格による推定フローは別の指標です。N/Aは未評価・欠損で、0を意味しません。</p></nav>
+  ${movementMonitorPanel()}
   ${renderMarketRegimePanel()}
   ${renderIntelligenceOSPanel()}
   ${renderThemeTrackerPanel()}
@@ -3626,6 +3724,7 @@ async function runBotSync(auto){
       }
       if(batches.length>1)await wait(350);
     }
+    movementIngest(MovementMonitor,Object.fromEntries(Object.entries(quotes).map(([t,q])=>[t,stale.includes(t)?{...q,stale:true}:q])),syms,Date.now(),IntelligenceOS.themes);
     const now=new Date().toISOString(),staleSet=new Set(stale.filter(Boolean)),updated=new Set(),freshUpdated=new Set();let posUpdated=0,posFresh=0;
     S.spark=S.spark||{};const cleanCloses=v=>Array.isArray(v)?v.map(Number).filter(n=>Number.isFinite(n)&&n>0).slice(-100):[];
     (S.positions||[]).forEach(p=>{p.ticker=normalizeTicker(p.ticker);const q=quotes[p.ticker];if(q&&q.price!=null){const isStale=!!q.stale||staleSet.has(p.ticker),rawCurrency=String(q.currency||p.currency||'USD').toUpperCase();p.currency=/^[A-Z]{3}$/.test(rawCurrency)?rawCurrency:'USD';p.price=+q.price;p.changePct=q.changePct==null?null:Number(q.changePct);p.priceAt=q.at||now;p.syncedAt=q.retrievedAt||now;p.priceSource=q.src||'api';p.marketState=q.marketState||'unknown';p.freshness=String(q.freshness||'');p.providerComparison=q.providerComparison&&typeof q.providerComparison==='object'?{status:String(q.providerComparison.status||'inconclusive'),differencePct:Number.isFinite(Number(q.providerComparison.differencePct))?Number(q.providerComparison.differencePct):null}:null;p.delayed=!!q.delayed;p.stale=isStale;if(q.name&&!p.name)p.name=q.name;const closes=cleanCloses(q.closes);if(closes.length>1)S.spark[p.ticker]=closes;updated.add(p.ticker);posUpdated++;if(!isStale){freshUpdated.add(p.ticker);posFresh++}}});
@@ -3696,6 +3795,9 @@ $('#hud-fresh').addEventListener('click',openSyncDetails);
 function renderAll(){renderHUD();renders[cur]();trophyCheck()}
 document.addEventListener('keydown',e=>{if((e.key==='Enter'||e.key===' ')&&e.target?.getAttribute?.('role')==='button'){e.preventDefault();e.target.click();return}if(e.key==='Escape')closeModal();if(e.key==='Tab'&&$('#modalbg').classList.contains('on')){const fs=[...$('#modal').querySelectorAll('button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])')];if(!fs.length)return;const a=document.activeElement,i=fs.indexOf(a);if(e.shiftKey&&(i<=0)){e.preventDefault();fs.at(-1).focus()}else if(!e.shiftKey&&i===fs.length-1){e.preventDefault();fs[0].focus()}}});
 setInterval(renderHUD,60000);
+setInterval(movementRefreshPanel,30000);
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)movementRefreshPanel()});
+window.addEventListener('pageshow',movementRefreshPanel);
 const rrgReducedMotionQuery=typeof matchMedia==='function'?matchMedia('(prefers-reduced-motion: reduce)'):null;rrgReducedMotionQuery?.addEventListener?.('change',event=>{if(event.matches)rrgStopPlayback()});
 document.addEventListener('visibilitychange',()=>{if(document.hidden)rrgStopPlayback(false);else refreshMarketRegimeIfAged()});
 renderAll();
