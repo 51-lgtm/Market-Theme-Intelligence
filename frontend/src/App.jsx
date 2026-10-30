@@ -475,6 +475,10 @@ function Workspace() {
           </div>
         </header>
         <div className="main-content">
+          <div className="banner" role="note">
+            <Icon name="alert" size={18} />
+            <span>無料プレビュー用コピー：サーバーのSQLite記録は再起動・休止・再デプロイで失われる場合があります。実口座情報・重要な保有記録は保存しないでください。JSON出力は完全復元用バックアップではありません。</span>
+          </div>
           {error && (
             <div className="banner error" role="alert">
               <Icon name="alert" size={18} />
@@ -805,14 +809,14 @@ function Login({ session, error, onLogin }) {
             </button>
           </form>
           <p className="login-help">
-            初回設定では、サーバー側の管理者パスワードと認証用シークレットを設定してください。APIキーはこの画面に入力しません。
+            初回設定では、サーバー側の管理者パスワードと認証用シークレットを設定してください。APIキーはこの画面に入力しません。無料プレビューではサーバー記録の永続保存を保証しません。
           </p>
           <a className="text-link" href="/">
             従来の司令室へ <Icon name="arrow" size={14} />
           </a>
         </div>
         <div className="login-foot">
-          SHADOW TRADING ENABLED <span>LIVE TRADING OFF</span>
+          SHADOW WORKSPACE <span>LIVE TRADING OFF</span>
         </div>
       </div>
     </div>
@@ -2402,7 +2406,7 @@ function Settings({ data, dashboard, session, busy, onMutation, onLogout }) {
             <KeyValue label="セッション" value="HttpOnly Cookie" />
             <a className="button full" href="/api/astra/export">
               <Icon name="download" size={16} />
-              Journal・分析データをJSON出力
+              Journal・分析データの一部をJSON出力
             </a>
             <a className="button full" href="/">
               従来の米国株司令室を開く <Icon name="arrow" size={16} />
@@ -2415,7 +2419,7 @@ function Settings({ data, dashboard, session, busy, onMutation, onLogout }) {
               ログアウト
             </button>
             <p className="micro-copy">
-              保有データの移行はポートフォリオ画面から行えます。
+              この出力にShadow口座・注文・ポジション・Kill Switchの全状態は含まれず、完全復元には使えません。無料プレビューへ実データを移行しないでください。
             </p>
           </div>
         </Panel>

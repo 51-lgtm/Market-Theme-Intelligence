@@ -174,6 +174,7 @@ main{padding:calc(var(--hud-h) + env(safe-area-inset-top) + 34px) 12px calc(var(
 .badge{font-family:var(--num);font-size:.56rem;font-weight:700;letter-spacing:.14em;padding:2.5px 7px;border-radius:5px}
 .badge.core{background:rgba(56,225,255,.13);color:var(--cyan);border:1px solid rgba(56,225,255,.3)}
 .badge.trade{background:rgba(255,180,84,.12);color:var(--amber);border:1px solid rgba(255,180,84,.3)}
+.pos.unpriced{border-color:var(--line)}
 .pos-price{margin-left:auto;text-align:right}
 .pos-price b{font-family:var(--num);font-size:1.16rem;font-weight:700}
 .pos-price small{display:block;font-family:var(--num);font-size:.72rem;font-weight:600}
@@ -383,6 +384,8 @@ main{padding:calc(var(--hud-h) + env(safe-area-inset-top) + 34px) 12px calc(var(
 .buy-warnings{display:grid;gap:4px;margin-top:8px}.buy-warning{border-left:2px solid var(--amber);background:rgba(246,200,95,.055);color:var(--amber);font-size:.58rem;line-height:1.5;padding:5px 7px;overflow-wrap:anywhere}.buy-warning.stop{border-color:var(--red);background:rgba(255,102,125,.055);color:var(--red)}
 .buy-details{margin-top:8px;border:1px solid var(--line);border-radius:8px;overflow:hidden}.buy-details summary{display:flex;align-items:center;min-height:44px;padding:0 8px;color:var(--mut);font-size:.58rem;cursor:pointer}.buy-detail-body{display:grid;gap:6px;border-top:1px solid var(--line);padding:7px}.buy-detail-group{min-width:0}.buy-detail-group b{display:block;color:var(--cyan);font-family:var(--num);font-size:.5rem;letter-spacing:.08em;margin-bottom:3px}.buy-detail-group p{color:var(--mut);font-size:.55rem;line-height:1.5;overflow-wrap:anywhere;white-space:pre-wrap}
 .buy-actions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;margin-top:9px}.buy-actions .btn{min-height:44px;padding:7px 5px;font-size:.6rem}.buy-state{min-height:180px;display:flex;align-items:center;justify-content:center;text-align:center;border:1px solid var(--line);border-radius:12px;background:var(--panel);color:var(--mut);font-size:.7rem;line-height:1.65;padding:18px}.buy-state b{display:block;color:var(--txt);font-size:.82rem;margin-bottom:4px}.buy-state .btn{min-height:44px;margin-top:9px}.buy-skeleton{height:220px;border-radius:12px;background:linear-gradient(100deg,var(--panel2) 20%,rgba(47,230,167,.09) 40%,var(--panel2) 60%);background-size:220% 100%;animation:themeShimmer 1.2s linear infinite}
+.ai-evidence-note{font-size:.72rem;line-height:1.6;color:var(--mut);margin:8px 0;overflow-wrap:anywhere}.ai-evidence-note b{color:var(--txt)}
+.market-guide b{display:block;font-size:.85rem;color:var(--txt)}.market-guide p{font-size:.72rem;line-height:1.6;color:var(--mut);margin-top:8px}.market-jumps{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin-top:8px}.market-jumps button{min-height:44px;padding:8px;border:1px solid var(--line);border-radius:8px;background:var(--panel2);color:var(--txt);font:inherit;font-size:.75rem;text-align:left;overflow-wrap:anywhere;cursor:pointer}.market-jumps button:focus-visible,#tab-mkt [tabindex="-1"]:focus-visible{outline:2px solid var(--cyan);outline-offset:3px}#tab-mkt [id]{scroll-margin-top:calc(var(--hud-h) + env(safe-area-inset-top) + 38px)}#tab-mkt .wchip{max-width:100%;flex-wrap:wrap}#tab-mkt .wchip button{min-width:44px;min-height:44px}#tab-mkt .ptitle{flex-wrap:wrap;overflow-wrap:anywhere}#tab-mkt .news p{overflow-wrap:anywhere}
 .watchchips{display:flex;gap:7px;flex-wrap:wrap}
 .wchip{display:flex;align-items:center;gap:6px;font-family:var(--num);font-weight:700;font-size:.84rem;letter-spacing:.05em;background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:7px 8px 7px 12px}
 .wchip button{background:none;border:none;color:var(--dim);cursor:pointer;font-size:.85rem;padding:0 2px}
@@ -1010,14 +1013,20 @@ function renderHUD(){
 }
 
 /* ============ TAB: 作戦 ============ */
+function hasActiveHoldings(state){return Array.isArray(state?.positions)&&state.positions.some(p=>typeof p?.shares==='number'&&Number.isFinite(p.shares)&&p.shares>0)}
+function opsDisplayState(state){
+  const rows=(Array.isArray(state?.positions)?state.positions:[]).filter(p=>typeof p?.shares==='number'&&Number.isFinite(p.shares)&&p.shares>0),hasHoldings=rows.length>0;
+  const valuationReady=hasHoldings&&rows.every(p=>typeof p.price==='number'&&Number.isFinite(p.price)&&p.price>0&&String(p.currency||'USD').toUpperCase()==='USD'),fx=state?.settings?.usdJpy,fxReady=typeof fx==='number'&&Number.isFinite(fx)&&fx>0;
+  return{hasHoldings,valuationReady,fxReady,healthReady:valuationReady&&fxReady};
+}
 function renderOps(){
-  const C=calc();
+  const C=calc(),display=opsDisplayState(S),{hasHoldings,valuationReady,fxReady,healthReady}=display;
   const R=54, circ=2*Math.PI*R;
   const dos=S.plan.dos||[], done=dos.filter(d=>d.done).length;
   const issuesHtml=C.issues.length?C.issues.map(i=>{
     const lb={crit:'危険',warn:'注意',info:'情報'}[i.sev];
     return `<div class="issue ${i.sev}"><span class="tag">${lb}</span><span>${esc(i.msg)}</span></div>`}).join('')
-    :'<div class="allclear">◈ ALL CLEAR ◈</div>';
+    :healthReady?'<div class="allclear">◈ ALL CLEAR ◈</div>':'<div class="empty">保有・価格データ未評価</div>';
   const c=S.plan.conclusion;
   $('#tab-ops').innerHTML=`
   <div class="panel" id="gate">
@@ -1025,19 +1034,19 @@ function renderOps(){
       <div class="gate-sweep"></div>
       <svg width="196" height="196">
         <circle class="gr-bg" cx="98" cy="98" r="${R}"></circle>
-        <circle class="gr-val" id="grval" cx="98" cy="98" r="${R}" stroke="${C.vcolor}"
+        <circle class="gr-val" id="grval" cx="98" cy="98" r="${R}" stroke="${healthReady?C.vcolor:'var(--mut)'}"
           stroke-dasharray="${circ}" stroke-dashoffset="${circ}"></circle>
       </svg>
       <div class="gate-core">
-        <div class="gate-verdict" style="color:${C.vcolor}">${C.verdict}</div>
-        <div class="gate-health">健全度 <b id="healthnum">0</b>%</div>
+        <div class="gate-verdict" style="color:${healthReady?C.vcolor:'var(--mut)'}">${healthReady?C.verdict:'未評価'}</div>
+        <div class="gate-health">${healthReady?'健全度 <b id="healthnum">0</b>%':'未評価 <b id="healthnum">—</b>'}</div>
       </div>
     </div>
-    <div class="gate-reason">${esc(C.vreason)}</div>
+    <div class="gate-reason">${healthReady?esc(C.vreason):hasHoldings?'価格欠損・換算未対応・為替未確認のため、保有全体は未評価です。':'保有を登録してから評価します。保有なしの初期値は健全性100%の確認を意味しません。'}</div><div class="ai-evidence-note">健全度は登録情報の警告件数に基づく補助指数で、安全性・利益の確率ではありません。未入力や未接続の口座資産は評価していません。</div>
     <button class="voicebtn" onclick="voiceBrief()">🔊 音声ブリーフ</button>
     <div class="gate-stats">
-      <div class="gs"><small>評価損益</small><b class="${C.pnl>=0?'grnc':'redc'}" id="pnlnum">$0</b><i>${fmtJpy(C.pnl*C.fx)}</i></div>
-      <div class="gs"><small>評価額</small><b>${fmtUsd(C.val)}</b><i>${fmtJpy(C.val*C.fx)}</i></div>
+      <div class="gs"><small>評価損益</small><b class="${valuationReady?(C.pnl>=0?'grnc':'redc'):'mut'}" id="pnlnum">${valuationReady?'$0':'N/A'}</b><i>${valuationReady&&fxReady?fmtJpy(C.pnl*C.fx):'価格・為替未評価'}</i></div>
+      <div class="gs"><small>評価額</small><b>${valuationReady?fmtUsd(C.val):'N/A'}</b><i>${valuationReady&&fxReady?fmtJpy(C.val*C.fx):'価格・為替未評価'}</i></div>
       <div class="gs"><small>枠使用</small><b class="${C.frameUsed>S.settings.frameJpy?'redc':''}">${Math.round(C.frameUsed/(S.settings.frameJpy||1)*100)}%</b><i>${fmtJpy(C.frameUsed)} / ${fmtJpy(S.settings.frameJpy)}</i></div>
     </div>
   </div>
@@ -1068,10 +1077,11 @@ function renderOps(){
     ${(S.plan.donts||[]).map(d=>`<div class="dontitem"><span style="flex:1">${esc(d.text)}</span><button class="del" onclick="delDont('${d.id}')">✕</button></div>`).join('')||'<div class="empty">なし</div>'}
     <div class="addrow"><input id="dontin" placeholder="禁止ルールを追加"><button class="btn red" onclick="addDont()">追加</button></div>
   </div>`;
-  requestAnimationFrame(()=>{requestAnimationFrame(()=>{
-    $('#grval').style.strokeDashoffset=circ*(1-C.health/100);
-    roll($('#healthnum'),C.health,v=>Math.round(v));
-    roll($('#pnlnum'),C.pnl,v=>fmtUsd(v));
+  const healthNode=$('#healthnum'),pnlNode=$('#pnlnum'),ringNode=$('#grval');
+  if(healthReady||valuationReady)requestAnimationFrame(()=>{requestAnimationFrame(()=>{
+    if(!healthNode?.isConnected||!pnlNode?.isConnected||!ringNode?.isConnected)return;
+    if(healthReady){ringNode.style.strokeDashoffset=circ*(1-C.health/100);roll(healthNode,C.health,v=>Math.round(v))}
+    if(valuationReady)roll(pnlNode,C.pnl,v=>fmtUsd(v));
   })});
 }
 function roll(el,to,f){if(!el)return;const t0=performance.now(),dur=900;function step(t){const p=Math.min(1,(t-t0)/dur),e=1-Math.pow(1-p,3);el.textContent=f(to*e);if(p<1)requestAnimationFrame(step)}requestAnimationFrame(step)}
@@ -1117,7 +1127,7 @@ function voiceBrief(){
   try{
     const C=calc();const M=S.ai?.market;const left=(S.plan.dos||[]).filter(d=>!d.done).length;
     const top=C.issues.find(i=>i.sev==='crit')||C.issues.find(i=>i.sev==='warn');
-    let t=`コチラ相棒ロボ、BUDDY。本日の司令、${C.verdict}。健全度${C.health}パーセント。${C.vreason}。`;
+    let t=opsDisplayState(S).healthReady?`コチラ相棒ロボ、BUDDY。本日の司令、${C.verdict}。健全度${C.health}パーセント。${C.vreason}。`:hasActiveHoldings(S)?'コチラ相棒ロボ、BUDDY。価格または為替が未確認のため、保有の健全度は未評価です。':'コチラ相棒ロボ、BUDDY。保有未登録のため、保有の健全度・損益は未評価です。';
     if(top)t+=`注意。${top.msg}。`;
     if(M&&M.rank&&M.rank[0])t+=`注目筆頭は${M.rank[0].t}。`;
     t+=`残りタスク${left}件。以上、通信終了。`;
@@ -1202,50 +1212,57 @@ function xrayGuidance(x){
   return '価格鮮度と数値STOPを維持。次回同期で残高DDとカバー率を再確認。';
 }
 function portfolioXrayPanel(){
-  const x=portfolioXrayMetrics(),dd=x.drawdown;
-  const ddText=dd?.armed?`${dd.drawdown.toFixed(1)}%`:'学習中';
-  const ddClass=dd?.breached?'ambc':dd?.near?'ambc':'grnc';
+  const x=portfolioXrayMetrics(),dd=x.drawdown,allocationIncomplete=x.unpricedCount>0||x.unsupportedCurrencyCount>0;
+  const ddComplete=x.rows.length>0&&x.fxValid===true&&!allocationIncomplete&&dd?.dataComplete===true;
+  const ddText=!ddComplete?'N/A（未評価）':dd?.armed?`${dd.drawdown.toFixed(1)}%${dd.dataFresh===true?'':'（参考・要同期）'}`:'学習中';
+  const ddClass=!ddComplete||!dd?.armed?'mut':dd.dataFresh!==true||dd.breached||dd.near?'ambc':'grnc';
   const quoteLabel=!x.rows.length?'—':x.quoteProblemCount?'要同期':x.manualCount?'手動混在':x.referenceCount?`${x.freshCount} LIVE・${x.referenceCount} 参考`:`${x.freshCount}/${x.rows.length} LIVE`;
-  const stopRisk=x.remainingStopRiskJpy==null?'N/A':(x.uncoveredCount?'≥':'')+fmtJpy(x.remainingStopRiskJpy),stopRiskDetail=x.breachedCount?`STOP超過幅 ${x.stopBreachExcessJpy==null?'N/A':fmtJpy(x.stopBreachExcessJpy)}・到達${x.breachedCount}`:x.knownStopRiskPct==null?'純資産比 N/A':x.stopRiskExact?x.stopRiskPct.toFixed(2)+'% of NAV':`既知下限 ${x.knownStopRiskPct.toFixed(2)}%・未知${x.uncoveredCount}`;
+  const stopRisk=allocationIncomplete||!x.rows.some(r=>r.hasNumericStop)||x.remainingStopRiskJpy==null?'N/A':(x.uncoveredCount?'≥':'')+fmtJpy(x.remainingStopRiskJpy),stopRiskDetail=allocationIncomplete?`保有全体は未評価（価格欠損${x.unpricedCount}・換算未対応${x.unsupportedCurrencyCount}・STOP到達${x.breachedCount}）`:!x.rows.length?'保有未登録・未評価':!x.rows.some(r=>r.hasNumericStop)?'価格・数値STOPを確認（未評価）':x.breachedCount?`STOP超過幅 ${x.stopBreachExcessJpy==null?'N/A':fmtJpy(x.stopBreachExcessJpy)}・到達${x.breachedCount}`:x.knownStopRiskPct==null?'純資産比 N/A':x.stopRiskExact?x.stopRiskPct.toFixed(2)+'% of NAV':`既知下限 ${x.knownStopRiskPct.toFixed(2)}%・未知${x.uncoveredCount}`;
   const rows=x.rows.map(r=>{
-    const w=r.weightPct,bar=w==null?0:Math.max(0,Math.min(100,w));
+    const w=allocationIncomplete?null:r.weightPct,bar=w==null?0:Math.max(0,Math.min(100,w));
     const stopText=!r.supportedCurrency?`${r.currency}→JPY換算未対応`:!r.validMark?'STOP幅 N/A':!r.hasNumericStop?(r.position.role==='core'?'数値STOPなし（CORE）':'数値STOP未設定'):r.breached?'STOP到達・残余リスク算定停止':`STOPまで ${r.remainingStopRiskJpy==null?'N/A':fmtJpy(r.remainingStopRiskJpy)}`;
     return `<div class="xray-row" role="listitem">
       <div class="xray-top"><b>${esc(r.ticker)}</b><span class="xval">${r.marketValueUsd==null?'評価不可':fmtUsd(r.marketValueUsd)}</span><span class="weight">${w==null?'比率 N/A':w.toFixed(1)+'%'}</span></div>
-      <div class="xray-bar" role="progressbar" aria-label="${esc(r.ticker)}の株式内構成比" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${bar.toFixed(1)}" aria-valuetext="${w==null?'価格未取得':w.toFixed(1)+'パーセント'}"><i style="width:${bar}%"></i></div>
+      <div class="xray-bar" role="progressbar" aria-label="${esc(r.ticker)}の株式内構成比" aria-valuemin="0" aria-valuemax="100" ${w==null?'':'aria-valuenow="'+bar.toFixed(1)+'"'} aria-valuetext="${w==null?'保有全体の構成比は未評価':w.toFixed(1)+'パーセント'}"><i style="width:${bar}%"></i></div>
       <div class="xray-meta"><span class="${r.breached?'redc':''}">${stopText}</span><span class="qtag ${r.quality.cls}">${esc(r.quality.label)}・${esc(r.position.priceSource||'source不明')}</span></div>
     </div>`;
   }).join('');
-  const integrity=!x.fxValid?'USD/JPYが無効のためNAV・STOP比率は算定不可':x.unsupportedCurrencyCount?`非USD ${x.unsupportedCurrencyCount}件をUSD扱いせず、NAV・リスク算定を停止`:x.unpricedCount?`価格未取得 ${x.unpricedCount}件をゼロ扱いせず、NAV・STOP比率はN/A`:`円換算NAV ${fmtJpy(x.navJpy)}・株式MV ${fmtUsd(x.stockMarketValueUsd)}`;
+  const integrity=!x.rows.length?'保有未登録のため株式・STOPリスクは未評価':!x.fxValid?'USD/JPYが無効のためNAV・STOP比率は算定不可':x.unsupportedCurrencyCount?`非USD ${x.unsupportedCurrencyCount}件をUSD扱いせず、NAV・リスク算定を停止`:x.unpricedCount?`価格未取得 ${x.unpricedCount}件をゼロ扱いせず、NAV・STOP比率はN/A`:`円換算NAV ${fmtJpy(x.navJpy)}・株式MV ${fmtUsd(x.stockMarketValueUsd)}`;
   return `<div class="panel" id="portfolio-xray"><div class="ptitle">PORTFOLIO X-RAY<span class="r">${x.rows.length}銘柄・SECURITY WEIGHT</span></div>
     <div class="xray-stats">
       <div class="xray-stat"><small>STOP参考損失</small><b class="${x.breachedCount?'redc':''}">${stopRisk}</b><i>${stopRiskDetail}</i></div>
-      <div class="xray-stat"><small>STOP COVER</small><b>${x.stopCoveragePct==null?'—':x.stopCoveragePct.toFixed(0)+'%'}</b><i>既知MV・未設定${x.uncoveredCount}・到達${x.breachedCount}</i></div>
+      <div class="xray-stat"><small>STOP COVER</small><b>${allocationIncomplete?'N/A':x.stopCoveragePct==null?'—':x.stopCoveragePct.toFixed(0)+'%'}</b><i>${allocationIncomplete?'全体比率は未評価・':'既知MV・'}未設定${x.uncoveredCount}・到達${x.breachedCount}</i></div>
       <div class="xray-stat"><small>CONCENTRATION</small><b>${x.hhi==null?'—':Math.round(x.hhi).toLocaleString()}</b><i>HHI 0–10,000${x.effectiveN==null?'':'・実効'+x.effectiveN.toFixed(1)+'銘柄'}</i></div>
       <div class="xray-stat"><small>QUOTE QUALITY</small><b class="${x.quoteProblemCount?'redc':x.manualCount?'ambc':'grnc'}">${quoteLabel}</b><i>古い${x.staleCount}・未取得${x.unpricedCount}</i></div>
     </div>
     <div class="xray-list" role="list" aria-label="銘柄別の株式内構成比とSTOPリスク">${rows||'<div class="empty">ポジションを追加すると配分とSTOPリスクを可視化します</div>'}</div>
     <div class="xray-action"><b>NEXT ACTION</b><span>${esc(xrayGuidance(x))}</span></div>
-    <div class="xray-actions"><span class="xray-note"><span class="${ddClass}">DRAWDOWN GUARD ${ddText}</span><br>${dd?.armed?`ピーク ${fmtJpy(dd.peak)}・`:''}円換算残高DD／入出金未調整／履歴最大180日・最高残高継続</span><button class="btn" type="button" onclick="openTradeGate()">TRADE GATE</button><button class="btn grn" type="button" onclick="openStressLab()">STRESS LAB</button></div>
+    <div class="xray-actions"><span class="xray-note"><span class="${ddClass}">DRAWDOWN GUARD ${ddText}</span><br>${ddComplete&&dd?.armed?`ピーク ${fmtJpy(dd.peak)}・`:''}円換算残高DD／入出金未調整／履歴最大180日・最高残高継続</span><button class="btn" type="button" onclick="openTradeGate()">TRADE GATE</button><button class="btn grn" type="button" onclick="openStressLab()">STRESS LAB</button></div>
     <div class="xray-note" style="margin-top:8px">${integrity}。STOP損失は現在値から発動価格までの参考値で、窓開け・スリッページを含みません。</div>
   </div>`;
 }
+function positionSummaryHtml(C,state){
+  const positions=Array.isArray(state?.positions)?state.positions:[],active=positions.filter(p=>Number.isFinite(p.shares)&&p.shares>0),cash=state?.cash||{},hasPositions=active.length>0;
+  const marked=active.filter(p=>typeof p.price==='number'&&Number.isFinite(p.price)&&p.price>0&&String(p.currency||'USD').toUpperCase()==='USD'),complete=hasPositions&&marked.length===active.length,dailyComplete=complete&&active.every(p=>typeof p.changePct==='number'&&Number.isFinite(p.changePct)),fxValid=typeof state?.settings?.usdJpy==='number'&&Number.isFinite(state.settings.usdJpy)&&state.settings.usdJpy>0&&typeof C.fx==='number'&&Number.isFinite(C.fx)&&C.fx>0;
+  const unavailable=hasPositions?'N/A':'未登録',coverage=`価格評価可能 ${marked.length}/${active.length}銘柄`;
+  return`<div class="ai-evidence-note" role="status">${hasPositions?`${coverage}。価格欠損・非USDを含む集計はN/A、当日騰落率の欠損も0に置き換えません。`:'保有未登録（または有効な株数なし）。評価額・損益・保有リスクは未評価です。0損失・健全性の確認済みを意味しません。'} 表示値は登録内容に基づき、口座残高の照合済みを意味しません。</div><div class="sumstrip">
+    <div class="gs"><small>株式評価額</small><b>${complete?fmtUsd(C.val):unavailable}</b><i>${complete&&fxValid?fmtJpy(C.val*C.fx):complete?'為替未確認':coverage}</i></div>
+    <div class="gs"><small>評価損益</small><b class="${complete?(C.pnl>=0?'grnc':'redc'):'mut'}">${complete?fmtUsd(C.pnl):unavailable}</b><i>${complete&&C.cost>0?pct(C.pnl/C.cost*100):'損益率 N/A'}</i></div>
+    <div class="gs"><small>当日損益</small><b class="${dailyComplete?(C.dayPnl>=0?'grnc':'redc'):'mut'}">${dailyComplete?fmtUsd(C.dayPnl):unavailable}</b><i>${dailyComplete&&fxValid?fmtJpy(C.dayPnl*C.fx):dailyComplete?'為替未確認':'当日騰落率の確認が必要'}</i></div>
+    <div class="gs"><small>現金（登録値）</small><b>${cash.jpy==null?'JPY未入力':fmtJpy(cash.jpy)}</b><i>${cash.usd==null?'USD未入力':fmtUsd(cash.usd)}</i></div>
+  </div>`;
+}
 function renderPos(){
-  const C=calc();
+  const C=calc(),fxDisplayReady=typeof S.settings?.usdJpy==='number'&&Number.isFinite(S.settings.usdJpy)&&S.settings.usdJpy>0;
   const cash=S.cash||{};
   monMigrate();
   $('#tab-pos').innerHTML=`
   ${ranchPanel()}
-  <div class="sumstrip">
-    <div class="gs"><small>${C.unsupportedCurrencyCount?'USD評価のみ':'評価額'}</small><b>${fmtUsd(C.val)}</b><i>${C.unsupportedCurrencyCount?'非USD '+C.unsupportedCurrencyCount+'件除外':fmtJpy(C.val*C.fx)}</i></div>
-    <div class="gs"><small>損益</small><b class="${C.pnl>=0?'grnc':'redc'}">${fmtUsd(C.pnl)}</b><i class="${C.pnl>=0?'grnc':'redc'}">${C.cost?pct(C.pnl/C.cost*100):'—'}</i></div>
-    <div class="gs"><small>当日損益</small><b class="${C.dayPnl>=0?'grnc':'redc'}">${fmtUsd(C.dayPnl)}</b><i>${fmtJpy(C.dayPnl*C.fx)}</i></div>
-    <div class="gs"><small>現金</small><b>${fmtJpy(cash.jpy||0)}</b><i>${cash.usd==null?'USD未入力':fmtUsd(cash.usd)}</i></div>
-  </div>
+  ${positionSummaryHtml(C,S)}
   ${riskPanel()}
   ${portfolioXrayPanel()}
   ${(S.positions||[]).map(p=>{
-    const hasPrice=p.price!=null&&p.price!==''&&Number.isFinite(Number(p.price)),live=hasPrice?Number(p.price):Number(p.avgCost)||0;
+    const hasPrice=typeof p.price==='number'&&Number.isFinite(p.price)&&p.price>0,live=hasPrice?Number(p.price):Number(p.avgCost)||0;
     const currency=String(p.currency||'USD').toUpperCase(),isUsd=currency==='USD',money=n=>isUsd?fmtUsd(n):currency+' '+Number(n).toLocaleString('en-US',{maximumFractionDigits:2});
     const v=p.shares*live, c=p.shares*p.avgCost, pl=v-c, plp=c?pl/c*100:0;
     const stale=hAgo(p.syncedAt||p.priceAt);
@@ -1253,7 +1270,7 @@ function renderPos(){
     const rr=rsi14((S.spark||{})[p.ticker]);
     const sparkMarkup=spark(p.ticker);
     const adviceOld=p.aiAdvice?marketRegimeAnalysisIsOld(p.aiAdvice):false;
-    return `<div class="pos ${pl>=0?'up':'dn'}">
+    return `<div class="pos ${!hasPrice?'unpriced':pl>=0?'up':'dn'}">
       <div class="pos-top">
         <button class="mon-mini" onclick="monModal('${p.id}')">${monSVG(m.line,m.stage,26)}</button>
         <span class="pos-tk">${esc(p.ticker)}</span>
@@ -1262,7 +1279,7 @@ function renderPos(){
         <div class="pos-price"><b>${hasPrice?(isUsd?'$':'')+live.toFixed(2)+(isUsd?'':' '+esc(currency)):'取得待ち'}</b><small class="${(p.changePct||0)>=0?'grnc':'redc'}">${hasPrice&&p.changePct!=null?pct(Number(p.changePct)):'—'}</small></div>
       </div>
       <div class="pos-mid"><span><b>${p.shares}</b>株 @ ${isUsd?'$':''}${p.avgCost} ${isUsd?'':esc(currency)}</span><span>取得 <b>${money(c)}</b></span><span class="${stale>24||p.stale?'ambc':''}" title="価格基準 ${fmtAt(p.priceAt)}">${p.stale?'古いデータ・':''}${agoTxt(stale)}・${esc(p.priceSource||'手動')}</span>${sparkMarkup?`<button type="button" class="sparkbox" aria-label="${esc(p.ticker)}のチャートを開く" onclick="chartModal('${p.ticker}')">${sparkMarkup}</button>`:''}</div>
-      <div class="pos-pnl"><span class="big">${money(pl)}</span><span class="pct">${pct(plp)}</span><span class="jpy">${isUsd?fmtJpy(pl*C.fx):'JPY換算未対応'}</span></div>
+      <div class="pos-pnl"><span class="big">${hasPrice?money(pl):'損益 N/A'}</span><span class="pct">${hasPrice&&c>0?pct(plp):'損益率 N/A'}</span><span class="jpy">${!hasPrice?'現在値未取得・取得価額で代用しません':isUsd?(fxDisplayReady?fmtJpy(pl*C.fx):'為替未確認・JPY N/A'):'JPY換算未対応'}</span></div>
       <div class="chips">
         ${(p.stop||p.stopPx)?`<span class="chip stopset">損切 ${p.stopPx?`${isUsd?'$':''}${esc(p.stopPx)}${isUsd?'':' '+esc(currency)}`:''}${p.stop?` ${esc(p.stop)}`:''}</span>`:(p.role==='core'?`<span class="chip">損切 未設定(コア)</span>`:`<span class="chip nostop">⚠ 損切り未設定</span>`)}
         ${(p.take||p.takePx)?`<span class="chip takeset">利確 ${p.takePx?`${isUsd?'$':''}${esc(p.takePx)}${isUsd?'':' '+esc(currency)}`:''}${p.take?` ${esc(p.take)}`:''}</span>`:`<span class="chip">利確 未設定</span>`}
@@ -1467,6 +1484,10 @@ function delPos(id){if(!confirm('このポジションを削除しますか？')
 function adoptAdvice(id){const p=S.positions.find(x=>x.id===id);if(!p||!p.aiAdvice)return;if(marketRegimeAnalysisIsOld(p.aiAdvice))return toast('旧市場レジームのAI提案です。再分析するまで発動価格へ反映できません');p.stop=p.aiAdvice.stop||p.stop;p.take=p.aiAdvice.take||p.take;p.next=p.aiAdvice.next||p.next;if(p.aiAdvice.stopPx)p.stopPx=p.aiAdvice.stopPx;if(p.aiAdvice.takePx)p.takePx=p.aiAdvice.takePx;p.aiAdvice.applied=true;beep(990,.08);save();renderAll();toast(p.ticker+' にAI提案を反映（発動価格もセット）');shisa('normal','発動価格をセット。'+p.ticker+'はボクが監視シマス',6000)}
 
 /* ============ TAB: AI ============ */
+function aiSnapshotProvenanceHtml(m){
+  const record=m&&typeof m==='object'?m:{};
+  return`<div class="ai-evidence-note"><b>このAI結果の時点</b><br>取込記録: ${esc(record.atIso?fmtAt(record.atIso):'未記録')}<br>保存された時刻表示（回答記載または取込時の補完）: ${esc(record.at||'未記録')}<br>入力した市場レジーム基準: ${esc(record.marketRegimeAsOf||'未記録')}<br>取込時刻は市場データの観測時刻・AI回答の最新性を保証しません。価格を同期しても、この保存済みAI回答は再生成されません。</div>`;
+}
 function renderAI(){
   marketRegimeInit();const M=S.ai?.market,macroAnalysisOld=marketRegimeAnalysisIsOld(M);
   const upd=`
@@ -1490,20 +1511,22 @@ function renderAI(){
   <div class="aihero ${cls}">
     <div class="aihero-top"><span style="font-size:1.1rem">${M.concl==='attack'?'⚔':'🛡'}</span><span class="aihero-v">${lbl}</span><span class="aihero-at">${esc(M.at||'')}${macroAnalysisOld?'・旧市場レジーム':''}</span></div>
     <p>${esc(M.text||M.reason||'')}</p>
-    <div class="srcs">${(M.src||[]).map(s=>`<span class="src">${esc(s)}</span>`).join('')}</div>
+    <div class="ai-evidence-note">申告出所（内容・鮮度の検証済みを意味しません）</div><div class="srcs">${(M.src||[]).map(s=>`<span class="src">${esc(s)}</span>`).join('')||'<span class="src">出所未記録</span>'}</div>
+    ${aiSnapshotProvenanceHtml(M)}
   </div>
   ${macroAnalysisOld?'<div class="theme-notice" role="status">VIX・WTI・SPYの観測revisionが更新または取得不能です。このAI結果は現在の市場判断へ使わず、再分析してください。</div>':''}
   <div class="panel"><div class="ptitle">AI ALERTS<span class="r">${(M.alerts||[]).length}件</span></div>
     ${(M.alerts||[]).map(a=>`<div class="alert-li">${esc(a)}</div>`).join('')||'<div class="empty">なし</div>'}
   </div>
-  <div class="ptitle" style="padding:2px 4px 8px">TARGET RANK<span class="r">${macroAnalysisOld?'旧分析・操作不可':'スコア順'}</span></div>
+  <div class="ai-evidence-note">候補はAI回答の取込順です。AI評価・TECHNICAL SCORE・Astra Scoreは別指標です。「行動メモに追加」はメモ保存のみで注文ではありません。この保存形式では欠損得点が0保存されるため、0だけで低評価と判断しないでください。</div><div class="iorow"><button class="btn" type="button" onclick="switchTab('mkt')">市場の観測データを確認</button></div>
+  <div class="ptitle" style="padding:2px 4px 8px">TARGET RANK<span class="r">${macroAnalysisOld?'旧分析・操作不可':'取込順・AI評価'}</span></div>
   ${(M.rank||[]).map((r,i)=>`<div class="rk">
     <div class="rk-top"><span class="rk-no">#${String(i+1).padStart(2,'0')}</span><span class="rk-tk">${esc(r.t)}</span>
-      <span class="rk-act ${r.a==='probe'?'probe':'check'}">${r.a==='probe'?'打診可':'監視'}</span>
+      <span class="rk-act ${r.a==='probe'?'probe':'check'}">${r.a==='probe'?'AI打診案':'AI監視案'}</span>
       ${r.conf==='high'?'<span class="rk-act probe" style="background:rgba(255,180,84,.12);color:var(--amber)">確度高</span>':''}
       <span class="rk-sc">${r.s}<small>/100</small></span></div>
     <div class="rk-bar"><i style="--w:${(r.s||0)/100}"></i></div>
-    <div class="rk-r">${esc(r.r||'')}</div>
+    <div class="rk-r">${esc(r.r||'')}</div><div class="ai-evidence-note">候補の出所: ${esc(r.source||'未記録')}・AI評価は上昇確率ではありません。</div>
     <div class="rk-plans">
       ${r.stopPlan?`<div class="rk-plan stop"><b>損切</b><span>${esc(r.stopPlan)}</span></div>`:''}
       ${r.takePlan?`<div class="rk-plan take"><b>利確</b><span>${esc(r.takePlan)}</span></div>`:''}
@@ -1511,11 +1534,11 @@ function renderAI(){
     </div>
     <div class="rk-btns">
       ${!(S.watch||[]).includes(r.t)&&!(S.positions||[]).find(p=>p.ticker===r.t)?`<button class="mini" onclick="rankWatch(${i})" ${macroAnalysisOld?'disabled aria-disabled="true"':''}>＋監視</button>`:''}
-      <button class="mini grn" onclick="rankDo(${i})" ${macroAnalysisOld?'disabled aria-disabled="true"':''}>DO化</button>
+      <button class="mini grn" onclick="rankDo(${i})" ${macroAnalysisOld?'disabled aria-disabled="true"':''}>行動メモに追加</button>
     </div>
   </div>`).join('')}
   ${shadowPanel()}
-  <div class="empty" style="padding-top:6px">※ rank・テーマ・ニュースはAIパイプライン / 価格同期 / JSON取込で更新</div>`;
+  <div class="empty" style="padding-top:6px">※ AI候補・AIテーマ・ニュースはAI分析 / JSON取込で更新。価格同期とは別です。</div>`;
   updateAiSrcLabel();
 }
 
@@ -2190,9 +2213,22 @@ function buySignalSafeRecord(value){
   Object.entries(source).slice(0,30).forEach(([key,val])=>{const k=safeText(key,60);if(k)out[k]=buySignalValueText(val,240)});
   return out;
 }
+function buySignalScoreExplanation(raw){
+  if(!raw||typeof raw!=='object'||Array.isArray(raw))return'内訳未取得。0点と未評価は異なります。';
+  const number=value=>value==null||typeof value==='boolean'||(typeof value!=='number'&&typeof value!=='string')||String(value).trim()===''||!Number.isFinite(Number(value))?'N/A':String(Number(value));
+  const labels={daily:'日足',weekly:'週足',theme:'テーマ',fundamentalNews:'材料'};
+  const groups=(Array.isArray(raw.groups)?raw.groups:[]).slice(0,4).map(group=>{
+    const g=group&&typeof group==='object'?group:{},components=(Array.isArray(g.components)?g.components:[]).slice(0,20);
+    const rows=components.map(item=>{const c=item&&typeof item==='object'?item:{},state=c.available!==true?'未評価':c.passed===true?'条件成立':c.passed===false?'条件不成立':'判定不明';return`  ${safeText(c.label||c.key,100)||'項目'}: ${state}${c.available===true?' / '+number(c.points)+'点':''}`});
+    return`${labels[g.key]||safeText(g.key,40)||'区分'}: ${number(g.points)} / ${number(g.maximum)}点（評価可能配点 ${number(g.availablePoints)}）${rows.length?'\n'+rows.join('\n'):''}`;
+  });
+  const deductions=(Array.isArray(raw.deductions)?raw.deductions:[]).slice(0,20).map(d=>`${safeText(d?.label||d?.key,100)||'減点'} ${number(d?.points)}点`);
+  const caps=(Array.isArray(raw.caps)?raw.caps:[]).slice(0,10).map(c=>`${safeText(c?.key,80)||'上限制約'}: 最大${number(c?.maximum)}点`);
+  return[groups.length?groups.join('\n'):'項目別内訳未取得',`加点合計 ${number(raw.rawScore)}点`,Array.isArray(raw.deductions)?'減点: '+(deductions.join(' / ')||'なし'):'減点: 未取得',`減点後・上限適用前 ${number(raw.scoreBeforeCaps)}点`,Array.isArray(raw.caps)?'上限制約: '+(caps.join(' / ')||'なし'):'上限制約: 未取得',`最終得点 ${number(raw.finalScore)}点`,'未評価は条件不成立・0点と同義ではありません。欠損値は補完していません。'].join('\n');
+}
 function normalizeBuySignalIndicator(raw){
-  const source=raw&&typeof raw==='object'&&!Array.isArray(raw)?raw:{},rsiRaw=source.rsi14??source.rsi,macdRaw=source.macd??source.macdSignal??source.macdState,emaRaw=source.ema??source.emaAlignment??source.emaState??([source.price,source.ema20,source.ema50,source.ema200].some(v=>Number.isFinite(Number(v)))?`P ${buySignalValueText(source.price,40)} / 20 ${buySignalValueText(source.ema20,40)} / 50 ${buySignalValueText(source.ema50,40)} / 200 ${buySignalValueText(source.ema200,40)}`:null),rvolRaw=source.rvol??source.rvol20??source.relativeVolume;
-  const number=value=>{const candidate=value&&typeof value==='object'?value.value??value.current:value,n=Number(candidate);return Number.isFinite(n)?n:null};
+  const source=raw&&typeof raw==='object'&&!Array.isArray(raw)?raw:{},rsiRaw=source.rsi14??source.rsi,macdRaw=source.macd??source.macdSignal??source.macdState,emaRaw=source.ema??source.emaAlignment??source.emaState??([source.price,source.ema20,source.ema50,source.ema200].some(v=>v!=null&&v!==''&&typeof v!=='boolean'&&Number.isFinite(Number(v)))?`P ${buySignalValueText(source.price,40)} / 20 ${buySignalValueText(source.ema20,40)} / 50 ${buySignalValueText(source.ema50,40)} / 200 ${buySignalValueText(source.ema200,40)}`:null),rvolRaw=source.rvol??source.rvol20??source.relativeVolume;
+  const number=value=>{const candidate=value&&typeof value==='object'?value.value??value.current:value;if(candidate==null||typeof candidate==='boolean'||(typeof candidate!=='number'&&typeof candidate!=='string')||String(candidate).trim()==='')return null;const n=Number(candidate);return Number.isFinite(n)?n:null};
   const rawStatus=String(source.status||'').toLowerCase(),status=source.available===true?'ready':['ok','ready'].includes(rawStatus)?'ready':['partial','stale','unavailable'].includes(rawStatus)?rawStatus:'unavailable';
   return{status,available:source.available===true||status==='ready',asOf:safeText(source.asOf,10),rsi:number(rsiRaw),macd:buySignalValueText(macdRaw),ema:buySignalValueText(emaRaw),rvol:number(rvolRaw)};
 }
@@ -2205,7 +2241,7 @@ function normalizeBuySignalResult(raw){
   const riskRaw=source.riskReward&&typeof source.riskReward==='object'?source.riskReward:{ratio:source.riskReward},planRaw=source.positionPlan&&typeof source.positionPlan==='object'?source.positionPlan:{},fundamental=buySignalSafeRecord(source.fundamental),quality=buySignalSafeRecord(source.quality),chaseRaw=source.highPriceChase&&typeof source.highPriceChase==='object'?source.highPriceChase:source.chase&&typeof source.chase==='object'?source.chase:{},themeRaw=source.theme;
   const num=(...values)=>{for(const value of values){const n=Number(value);if(value!==''&&value!=null&&Number.isFinite(n))return n}return null},warnings=(Array.isArray(source.warnings)?source.warnings:[]).slice(0,20).map(v=>safeText(typeof v==='string'?v:v?.message||v?.reason||buySignalValueText(v),500)).filter(Boolean),provenance=(Array.isArray(source.provenance)?source.provenance:source.provenance&&typeof source.provenance==='object'?Object.entries(source.provenance).map(([k,v])=>`${k}: ${buySignalValueText(v)}`):[]).slice(0,20).map(v=>safeText(typeof v==='string'?v:buySignalValueText(v),300)).filter(Boolean);
   const activeCount=num(typeof source.active==='number'?source.active:null,signalBox.active,source.activeSignals)??signals.filter(signal=>signal.passed===true).length,availableCount=num(typeof source.available==='number'?source.available:null,signalBox.available,source.availableSignals)??signals.filter(signal=>signal.available).length,stale=source.stale===true||status==='stale'||source.availability?.stale===true||source.quality?.stale===true,available=source.available===true||source.availability?.available===true||availableCount===8,active=source.active===true||source.signalActive===true,leveragedProduct=source.leveragedProduct===true||source.leveraged===true,leverageBlocked=leveragedProduct||source.leverageBlocked===true||source.restrictions?.leverageBlocked===true,chaseBlocked=source.highChaseBlocked===true||source.chaseBlocked===true||chaseRaw.blocked===true,earningsBlocked=source.earningsBlocked===true||source.restrictions?.earningsBlocked===true,daily=normalizeBuySignalIndicator(source.indicators?.daily??source.technical?.daily??source.daily),weekly=normalizeBuySignalIndicator(source.indicators?.weekly??source.technical?.weekly??source.weekly),rrEligible=riskRaw.eligible===true||riskRaw.passed===true?true:riskRaw.eligible===false||riskRaw.passed===false?false:null,priceMode=safeText(source.quality?.priceMode,32),qualityAdjusted=source.quality?.adjusted===true||priceMode==='adjusted',qualitySufficient=source.quality?.sufficient===true,asOf=safeText(source.asOf||daily.asOf,64);
-  return{symbol,status,stale,available,active,activeCount,availableCount,signalContractValid,usable:false,asOf,price:num(source.price,source.currentPrice),score:num(source.score),decision:safeText(source.decision??source.recommendation??'UNAVAILABLE',80),signals,indicators:{daily,weekly},theme:typeof themeRaw==='string'?safeText(themeRaw,120):safeText(themeRaw?.name||themeRaw?.label||themeRaw?.id,120),earningsDays:num(source.earningsDays,source.daysToEarnings,source.fundamental?.earningsDays,source.fundamental?.daysToEarnings),earningsBlocked,leveragedProduct,leverageBlocked,chaseBlocked,chaseText:safeText(source.highChaseReason||source.chaseReason||chaseRaw.reason||chaseRaw.status,240),riskReward:{ratio:num(riskRaw.ratio,riskRaw.value,riskRaw.rr),minimum:num(riskRaw.minimum,riskRaw.min),eligible:rrEligible,blocked:riskRaw.blocked===true||rrEligible===false,reason:safeText(riskRaw.reason||riskRaw.status,240)},positionPlan:{amountJpy:num(planRaw.amountJpy,planRaw.amount,source.amount),shares:num(planRaw.shares,source.shares),entry:num(planRaw.entry,planRaw.entryLow,source.entry),entryLow:num(planRaw.entryLow,planRaw.entry),entryHigh:num(planRaw.entryHigh,planRaw.entry),ema20RecoveryPrice:num(planRaw.ema20RecoveryPrice),breakoutPrice:num(planRaw.breakoutPrice),chaseLimitPrice:num(planRaw.chaseLimitPrice),stop:num(planRaw.stopPx,planRaw.stop,source.stop),take:num(planRaw.take1Px,planRaw.take1,planRaw.take,source.take),take1:num(planRaw.take1Px,planRaw.take1,planRaw.take,source.take),take2:num(planRaw.take2Px,planRaw.take2)},qualityAdjusted,qualitySufficient,priceMode,fundamental,quality,warnings,provenance,tradeEligible:false,execution:{mode:'SIMULATE',autoOrder:false,tradingConnected:false}};
+  return{symbol,status,stale,available,active,activeCount,availableCount,signalContractValid,usable:false,asOf,price:num(source.price,source.currentPrice),score:num(source.score),scoreExplanation:buySignalScoreExplanation(source.scoreBreakdown),decision:safeText(source.decision??source.recommendation??'UNAVAILABLE',80),signals,indicators:{daily,weekly},theme:typeof themeRaw==='string'?safeText(themeRaw,120):safeText(themeRaw?.name||themeRaw?.label||themeRaw?.id,120),earningsDays:num(source.earningsDays,source.daysToEarnings,source.fundamental?.earningsDays,source.fundamental?.daysToEarnings),earningsBlocked,leveragedProduct,leverageBlocked,chaseBlocked,chaseText:safeText(source.highChaseReason||source.chaseReason||chaseRaw.reason||chaseRaw.status,240),riskReward:{ratio:num(riskRaw.ratio,riskRaw.value,riskRaw.rr),minimum:num(riskRaw.minimum,riskRaw.min),eligible:rrEligible,blocked:riskRaw.blocked===true||rrEligible===false,reason:safeText(riskRaw.reason||riskRaw.status,240)},positionPlan:{amountJpy:num(planRaw.amountJpy,planRaw.amount,source.amount),shares:num(planRaw.shares,source.shares),entry:num(planRaw.entry,planRaw.entryLow,source.entry),entryLow:num(planRaw.entryLow,planRaw.entry),entryHigh:num(planRaw.entryHigh,planRaw.entry),ema20RecoveryPrice:num(planRaw.ema20RecoveryPrice),breakoutPrice:num(planRaw.breakoutPrice),chaseLimitPrice:num(planRaw.chaseLimitPrice),stop:num(planRaw.stopPx,planRaw.stop,source.stop),take:num(planRaw.take1Px,planRaw.take1,planRaw.take,source.take),take1:num(planRaw.take1Px,planRaw.take1,planRaw.take,source.take),take2:num(planRaw.take2Px,planRaw.take2)},qualityAdjusted,qualitySufficient,priceMode,fundamental,quality,warnings,provenance,tradeEligible:false,execution:{mode:'SIMULATE',autoOrder:false,tradingConnected:false}};
 }
 function normalizeBuySignalResponse(raw,allowedSymbols=[]){
   const source=raw&&typeof raw==='object'&&!Array.isArray(raw)?raw:null;if(!source)throw new Error('買いシグナルAPIの応答形式が不正です');
@@ -2237,12 +2273,12 @@ function buySignalCard(result,index,globalStop){
   const flags=[`<span class="buy-flag ${result.available?'ok':'stop'}">AVAILABLE ${esc(availableText)}</span>`,`<span class="buy-flag ${eligible?'ok':'warn'}">ACTIVE ${esc(activeText)}</span>`,`<span class="buy-flag ${result.usable?'ok':'stop'}">${esc(result.status.toUpperCase())}</span>`,`<span class="buy-flag ${rrBlocked?'stop':'ok'}">RR ${esc(rr)}</span>`];
   if(held)flags.push('<span class="buy-flag warn">保有中・新規買い扱いなし</span>');if(result.leveragedProduct)flags.push('<span class="buy-flag warn">レバレッジ商品</span>');if(result.leverageBlocked)flags.push('<span class="buy-flag stop">レバレッジ制限</span>');if(result.chaseBlocked)flags.push('<span class="buy-flag stop">高値追い制限</span>');if(earningsRestricted)flags.push('<span class="buy-flag stop">決算接近制限</span>');if(globalStop)flags.push('<span class="buy-flag stop">ACCOUNT GLOBAL STOP</span>');
   const warnings=[...(result.leveragedProduct||result.leverageBlocked?['レバレッジ商品はシグナルが強くても新規候補から除外されています']:[]),...(result.chaseBlocked?[result.chaseText||'高値追い条件によりエントリー不可']:[]),...(rrBlocked?[result.riskReward.reason||'リスクリワード条件を満たしていません']:[]),...(earningsRestricted?[`決算まで${result.earningsDays==null?'N/A':result.earningsDays+'日'}のため新規エントリー制限`]:[]),...(globalStop?['口座の重大リスクが解消するまで候補はWAITです']:[]),...result.warnings];
-  return`<article class="buy-card ${kind}" aria-labelledby="buy-title-${index}"><div class="buy-card-head"><div class="buy-identity"><div class="buy-ticker"><b id="buy-title-${index}">${esc(result.symbol)}</b><span class="buy-price">${esc(buySignalPrice(result.price))}</span></div><div class="buy-context"><span>THEME ${esc(result.theme||'N/A')}</span><span>決算 ${esc(result.earningsDays==null?'N/A':result.earningsDays+'日後')}</span><span>SCORE ${esc(result.score==null?'N/A':result.score.toFixed(1))}</span></div></div><div class="buy-verdict ${kind}"><b>${esc(decision)}</b><small>SIMULATE判定</small></div></div>
+  return`<article class="buy-card ${kind}" aria-labelledby="buy-title-${index}"><div class="buy-card-head"><div class="buy-identity"><div class="buy-ticker"><b id="buy-title-${index}">${esc(result.symbol)}</b><span class="buy-price">${esc(buySignalPrice(result.price))}</span></div><div class="buy-context"><span>THEME ${esc(result.theme||'N/A')}</span><span>決算 ${esc(result.earningsDays==null?'N/A':result.earningsDays+'日後')}</span><span title="日足45・週足20・テーマ15・材料20から減点・上限制約を適用。Astra Scoreとは別指標で、上昇確率ではありません">TECHNICAL SCORE ${esc(result.score==null?'N/A':result.score.toFixed(1))}</span></div></div><div class="buy-verdict ${kind}"><b>${esc(decision)}</b><small>SIMULATE判定</small></div></div>
   <div class="buy-flags">${flags.join('')}</div><div class="buy-timeframes">${buySignalIndicatorHtml(result.indicators.daily,'日足')}${buySignalIndicatorHtml(result.indicators.weekly,'週足')}</div>
   <div class="buy-plan" aria-label="${esc(result.symbol)} シミュレーション計画"><div><small>AMOUNT</small><b>${esc(plan.amountJpy==null?'N/A':'¥'+Math.round(plan.amountJpy).toLocaleString('ja-JP'))}</b></div><div><small>SHARES</small><b>${esc(plan.shares==null?'N/A':String(plan.shares))}</b></div><div><small>ENTRY ZONE</small><b>${esc(plan.entryLow==null?buySignalPrice(plan.entry):`${buySignalPrice(plan.entryLow)}–${buySignalPrice(plan.entryHigh)}`)}</b></div><div><small>STOP</small><b>${esc(buySignalPrice(plan.stop))}</b></div><div><small>TAKE 1</small><b>${esc(buySignalPrice(plan.take1))}</b></div><div><small>TAKE 2</small><b>${esc(buySignalPrice(plan.take2))}</b></div><div><small>CHASE LIMIT</small><b>${esc(buySignalPrice(plan.chaseLimitPrice))}</b></div></div>
   <ul class="buy-checklist" aria-label="8信号チェックリスト">${result.signals.map(signal=>`<li class="buy-check ${signal.passed===true?'pass':signal.passed===false?'fail':'na'}"><i aria-hidden="true">${signal.passed===true?'✓':signal.passed===false?'×':'—'}</i><span><b>${esc(signal.label)}・${signal.passed===true?'合格':signal.passed===false?'不合格':'判定不能'}</b><small>${esc(signal.value)}${signal.detail?'｜'+esc(signal.detail):''}</small></span></li>`).join('')}</ul>
   ${warnings.length?`<div class="buy-warnings">${warnings.slice(0,20).map((warning,i)=>`<div class="buy-warning ${i<4&&hardBlocked?'stop':''}">${esc(warning)}</div>`).join('')}</div>`:''}
-  <details class="buy-details"><summary>テーマ・ファンダ・品質・出所を確認</summary><div class="buy-detail-body"><div class="buy-detail-group"><b>THEME / RISK REWARD</b><p>${esc(result.theme||'N/A')}\nRR ${esc(rr)}${result.riskReward.minimum==null?'':' / minimum '+esc(result.riskReward.minimum)}${result.riskReward.reason?'\n'+esc(result.riskReward.reason):''}</p></div><div class="buy-detail-group"><b>FUNDAMENTAL</b><p>${esc(buySignalRecordText(result.fundamental))}</p></div><div class="buy-detail-group"><b>QUALITY</b><p>${esc(buySignalRecordText(result.quality))}</p></div><div class="buy-detail-group"><b>PROVENANCE</b><p>${esc(result.provenance.join('\n')||'N/A')}</p></div></div></details>
+  <details class="buy-details"><summary>得点内訳・未評価項目・品質・出所を確認</summary><div class="buy-detail-body"><div class="buy-detail-group"><b>TECHNICAL SCORE の出所</b><p>日足45・週足20・テーマ15・材料20から減点・上限制約を適用。Astra Scoreとは別指標で、上昇確率ではありません。</p><p>${esc(result.scoreExplanation||'内訳未取得。0点と未評価は異なります。')}</p></div><div class="buy-detail-group"><b>THEME / RISK REWARD</b><p>${esc(result.theme||'N/A')}\nRR ${esc(rr)}${result.riskReward.minimum==null?'':' / minimum '+esc(result.riskReward.minimum)}${result.riskReward.reason?'\n'+esc(result.riskReward.reason):''}</p></div><div class="buy-detail-group"><b>FUNDAMENTAL</b><p>${esc(buySignalRecordText(result.fundamental))}</p></div><div class="buy-detail-group"><b>QUALITY</b><p>${esc(buySignalRecordText(result.quality))}</p></div><div class="buy-detail-group"><b>PROVENANCE</b><p>${esc(result.provenance.join('\n')||'N/A')}</p></div></div></details>
   <div class="buy-actions"><button class="btn" type="button" data-buy-focus="shadow-${index}" onclick="addBuySignalShadow(${index})" ${!eligible||shadowed?'disabled aria-disabled="true"':''}>SHADOW追加</button><button class="btn" type="button" data-buy-focus="watch-${index}" onclick="addBuySignalWatch(${index})" ${watched?'disabled aria-disabled="true"':''}>監視追加</button><button class="btn grn" type="button" data-buy-focus="refresh-${index}" onclick="fetchBuySignals(true)" ${BuySignals.loading?'disabled aria-disabled="true"':''}>再分析</button></div></article>`;
 }
 function addBuySignalShadow(index){
@@ -2277,6 +2313,16 @@ function renderBuy(){
   let body;if(BuySignals.loading)body='<div class="buy-list"><div class="buy-skeleton" aria-hidden="true"></div><div class="buy-state" role="status"><div><b>8信号を分析中</b>日足・週足・テーマ・リスク制限を照合しています</div></div></div>';else if(status==='unavailable'||status==='idle')body=`<div class="buy-list"><div class="buy-state" role="alert"><div><b>UNAVAILABLE</b>${esc(BuySignals.error||'買いシグナルは未取得です')}<br>古い保持データは買い判断へ使いません。<br><button class="btn grn" type="button" data-buy-focus="retry" onclick="fetchBuySignals(true)">再分析</button></div></div></div>`;else if(!BuySignals.results.length)body='<div class="buy-list"><div class="buy-state" role="status"><div><b>候補なし</b>現在の条件を満たす表示対象がありません</div></div></div>';else body=`${status!=='ready'?`<div class="theme-notice" role="status">${esc(buySignalStatusLabel(status))}: 応答全体に欠損があります。各銘柄は調整済み価格履歴・鮮度・安全ゲートを個別確認し、判定不能の信号は「—」で表示します。</div>`:''}<div class="buy-list">${BuySignals.results.map((result,index)=>buySignalCard(result,index,globalStop)).join('')}</div>`;
   root.innerHTML=summary+body;if(focusKey)requestAnimationFrame(()=>[...root.querySelectorAll('[data-buy-focus]')].find(node=>node.dataset.buyFocus===focusKey)?.focus());
 }
+function jumpMarketSection(id){
+  if(!['market-guide','market-risk-regime','theme-intelligence-os','theme-tracker','market-ai-themes','market-watch-list','market-news-feed'].includes(id))return;
+  const target=document.querySelector('#tab-mkt #'+id);if(!target)return;
+  target.setAttribute('tabindex','-1');target.focus({preventScroll:true});target.scrollIntoView({block:'start',behavior:'auto'});
+}
+function marketWatchQuoteHtml(q){
+  if(!q)return'<em class="wq mut">価格未取得</em>';
+  const valid=value=>typeof value==='number'&&Number.isFinite(value),price=valid(q.price)&&q.price>0?'$'+q.price.toFixed(2):'価格N/A',change=valid(q.changePct)?pct(q.changePct):'騰落N/A',cls=!valid(q.changePct)?'mut':q.changePct>=0?'grnc':'redc';
+  return`<em class="wq ${cls}" title="${esc(q.src||'api')}・取得 ${esc(fmtAt(q.syncedAt||q.at))}${q.delayed?'・遅延値':''}${q.stale?'・古いデータ':''}">${price} ${change}</em>`;
+}
 function renderMkt(){
   const ths=[...(S.themes||[])].sort((a,b)=>b.score-a.score);
   const trIcon=t=>t==='up'?'<span class="grnc">▲</span>':t==='down'?'<span class="redc">▼</span>':'<span class="mut">▶</span>';
@@ -2284,22 +2330,23 @@ function renderMkt(){
   const news={};(S.news||[]).forEach(n=>{const k=n.h;if(!news[k]||new Date(n.at)>new Date(news[k].at))news[k]=n});
   const nlist=Object.values(news).sort((a,b)=>new Date(b.at)-new Date(a.at));
   $('#tab-mkt').innerHTML=`
+  <nav class="panel market-guide" id="market-guide" aria-label="市場画面のページ内移動"><b>市場のどこを見る？</b><div class="market-jumps"><button type="button" onclick="jumpMarketSection('market-risk-regime')">① 市場リスク</button><button type="button" onclick="jumpMarketSection('theme-intelligence-os')">② テーマ地図</button><button type="button" onclick="jumpMarketSection('theme-tracker')">③ 期間別リターン</button><button type="button" onclick="jumpMarketSection('market-ai-themes')">④ AI評価</button><button type="button" onclick="jumpMarketSection('market-watch-list')">⑤ 監視銘柄</button><button type="button" onclick="jumpMarketSection('market-news-feed')">⑥ ニュース</button></div><p>モデル得点・過去リターン・価格による推定フローは別の指標です。N/Aは未評価・欠損で、0を意味しません。</p></nav>
   ${renderMarketRegimePanel()}
   ${renderIntelligenceOSPanel()}
   ${renderThemeTrackerPanel()}
   ${arenaPanel()}
-  <div class="panel"><div class="ptitle">AI THEME SCORE<span class="r">実測リターンとは別指標</span></div>
-    <div id="radarbox">${radarSVG(S.themes||[])}</div>
+  <div class="panel" id="market-ai-themes"><div class="ptitle">AI THEME SCORE<span class="r">実測リターンとは別指標</span></div>
+    <div class="ai-evidence-note">保存済みAI評価です。価格同期だけでは評価は更新されません。この保存形式では未評価が0として保存されることがあり、0と未評価を遡って区別できません。実測リターンは「③ 期間別リターン」で確認してください。</div><div id="radarbox">${radarSVG(S.themes||[])}</div>
     ${ths.map(t=>`<div class="th-li"><span class="th-nm">${esc(t.name)}</span>
       <div class="th-bar"><i style="--w:${t.score/100};background:${t.score>=85?'linear-gradient(90deg,#38e1ff,#2fe6a7)':t.score>=70?'#38e1ff':'#5a6b85'}"></i></div>
       <span class="th-sc" style="color:${t.score>=85?'var(--green)':t.score>=70?'var(--cyan)':'var(--mut)'}">${t.score}</span>
-      <span class="th-tr">${trIcon(t.trend)}</span>${enB(t.entry)}</div>`).join('')}
+      <span class="th-tr">${trIcon(t.trend)}</span>${enB(t.entry)}</div><div class="ai-evidence-note">${esc(t.name)} / 出所 ${esc(t.src||'未記録')} / 取込記録 ${esc(t.at?fmtAt(t.at):'未記録')}</div>`).join('')}
   </div>
-  <div class="panel"><div class="ptitle">WATCH LIST<span class="r">${(S.watch||[]).length}銘柄</span></div>
-    <div class="watchchips">${(S.watch||[]).map(w=>{const q=(S.watchQuotes||{})[w];return `<span class="wchip"><b class="wtk" role="button" tabindex="0" onclick="chartModal('${esc(w)}')">${esc(w)}</b>${q?`<em class="wq ${q.changePct>=0?'grnc':'redc'}" title="${esc(q.src||'api')}・${fmtAt(q.syncedAt||q.at)}${q.delayed?'・遅延値':''}">$${(+q.price).toFixed(2)} ${pct(q.changePct)}</em>`:''}<button aria-label="${esc(w)}を監視から削除" onclick="delWatch('${esc(w)}')">✕</button></span>`}).join('')||'<span class="empty">なし</span>'}</div>
-    <div class="addrow"><input id="win" placeholder="ティッカー追加" style="text-transform:uppercase"><button class="btn" onclick="addWatch()">追加</button></div>
+  <div class="panel" id="market-watch-list"><div class="ptitle">WATCH LIST<span class="r">${(S.watch||[]).length}銘柄</span></div>
+    <div class="watchchips">${(S.watch||[]).map(w=>{const q=(S.watchQuotes||{})[w];return `<span class="wchip"><b class="wtk" role="button" tabindex="0" onclick="chartModal('${esc(w)}')">${esc(w)}</b>${marketWatchQuoteHtml(q)}<button aria-label="${esc(w)}を監視から削除" onclick="delWatch('${esc(w)}')">✕</button></span>`}).join('')||'<span class="empty">なし</span>'}</div>
+    <div class="addrow"><input id="win" aria-label="監視するティッカーを追加" placeholder="ティッカー追加" style="text-transform:uppercase"><button class="btn" onclick="addWatch()">追加</button></div>
   </div>
-  <div class="ptitle" style="padding:2px 4px 8px">NEWS FEED<span class="r">重複除去済 ${nlist.length}件</span></div>
+  <div class="ptitle" id="market-news-feed" style="padding:2px 4px 8px">NEWS FEED<span class="r">重複除去済 ${nlist.length}件</span></div>
   ${nlist.map(n=>`<div class="news">
     <div class="news-top"><span class="imp ${n.i==='良'?'g':n.i==='悪'?'b':'m'}">${esc(n.i)}</span><span class="news-meta">${esc(n.t)} ・ ${esc(n.d)} ・ ${esc(n.src||'')}</span></div>
     <h4>${esc(n.h)}</h4><p>${esc(n.s)}</p>${n.a?`<span class="act">→ ${esc(n.a)}</span>`:''}
@@ -2337,30 +2384,43 @@ function syncMarketRegimeText(st){
   const vix=mr.vix==null?'N/A':Number(mr.vix).toFixed(1),wti=mr.wti==null?'N/A':'$'+Number(mr.wti).toFixed(2),asOf=safeText(mr.asOf||mr.vixAsOf||mr.wtiAsOf,10)||'N/A',cache={hit:'キャッシュ再利用',refreshed:'上流再取得','stale-fallback':'古いキャッシュ'}[mr.cache]||'取得方式不明',age=mr.cacheAgeMs==null?'':`・${Math.round(Number(mr.cacheAgeMs)/1000)}秒前`;
   return`${status}・VIX ${vix}・WTI ${wti}・基準日 ${asOf}・${cache}${age}${mr.refreshSuppressed?'・短時間内の再操作のため再利用':''}${mr.error?'・'+mr.error:''}`;
 }
+function syncOutcomeText(st){
+  if(st?.status==='syncing')return'同期中です。表示値には前回の取得結果が含まれる場合があります';
+  if(st?.status==='error')return'同期に失敗しました。前回の表示値を最新値として扱わないでください';
+  if(st?.status==='partial')return'一部成功です。未取得・古いデータ・品質の詳細を確認してください';
+  if(st?.status==='ok'&&st.lastResponseAt)return'最終同期は正常に完了しました（すべての価格がLIVEであることは意味しません）';
+  return'同期結果は未確認です';
+}
+function syncBenchmarkText(st){
+  if(st?.status==='syncing')return'同期中（前回値の場合あり）';
+  if(st?.status==='error')return'今回の同期では確認できません';
+  if(!st?.lastResponseAt||!['ok','partial'].includes(st.status))return'未確認';
+  return st.benchmarkError?'取得失敗':st.benchmarkStale?'古いキャッシュ':'取得済み（LIVE保証なし）';
+}
 function syncCenterPanel(){
   const st=S.sync||{};
   const status=st.status==='syncing'?'partial':st.status||'idle';
   const label={idle:'未接続',ok:'正常',partial:st.status==='syncing'?'同期中':'一部成功',error:'接続失敗'}[status]||'未接続';
   const failed=(st.failures||[]).slice(0,6).join(', ');
   const stale=(st.stale||[]).slice(0,6).join(', ');
-  const benchmark=st.benchmarkError?'取得失敗':st.benchmarkStale?'古いキャッシュ':'正常';
+  const benchmark=syncBenchmarkText(st);
   const quality=st.quality?`${Math.round(st.quality.coveragePct||0)}%・LIVE ${st.quality.live??st.quality.fresh??0}・終値 ${st.quality.closeValid||0}・参考 ${st.quality.reference||0}・未検証 ${st.quality.unverified||0}・差警告 ${st.quality.consensusWarnings||0}`:'未計測';
-  return `<div class="panel"><div class="ptitle">DATA CONNECTION<span class="r"><span class="conn-state ${status}">${label}</span></span></div>
+  return `<div class="panel"><div class="ptitle">DATA CONNECTION<span class="r"><span data-sync-state class="conn-state ${status}">${label}</span></span></div>
     <div class="conn-grid">
-      <div class="conn-cell"><small>LAST SUCCESS</small><b>${fmtAt(st.lastSuccessAt)}</b></div>
-      <div class="conn-cell"><small>LAST RESPONSE</small><b>${fmtAt(st.lastResponseAt||st.lastAttemptAt)}</b></div>
+      <div class="conn-cell"><small>最終データ受入（部分更新含む）</small><b>${fmtAt(st.lastSuccessAt)}</b></div>
+      <div class="conn-cell"><small>LAST ATTEMPT FINISHED</small><b>${fmtAt(st.lastResponseAt)}</b></div>
       <div class="conn-cell"><small>STOCK SOURCE</small><b>${esc((st.sources||[]).join(', ')||'未取得')}</b></div>
       <div class="conn-cell"><small>FX SOURCE</small><b>${esc(st.fxSource||S.settings.fxSource||'manual')}</b></div>
     </div>
-    <div class="conn-detail">${st.lastError?`⚠ ${esc(st.lastError)}`:`${st.updated||0}銘柄更新・${Math.round(st.durationMs||0).toLocaleString()}ms`}${failed?`<br>未取得: ${esc(failed)}`:''}${stale?`<br>古いデータ: ${esc(stale)}`:''}<br>VIX / WTI: ${esc(syncMarketRegimeText(st))}<br>品質: ${esc(quality)}・SPYベンチマーク: ${benchmark}<br><small>VIX・WTIは日次確定終値です。休場中や新しい終値の確定前は、更新しても値と基準日が変わらない場合があります。</small></div>
+    <div class="conn-detail"><span data-sync-outcome aria-live="polite">${esc(syncOutcomeText(st))}</span><br>${st.lastError?`⚠ ${esc(st.lastError)}`:`${st.updated||0}銘柄更新・${Math.round(st.durationMs||0).toLocaleString()}ms`}${failed?`<br>未取得: ${esc(failed)}`:''}${stale?`<br>古いデータ: ${esc(stale)}`:''}<br>VIX / WTI: ${esc(syncMarketRegimeText(st))}<br>品質: ${esc(quality)}・SPYベンチマーク: <span data-sync-benchmark>${benchmark}</span><br><small>データ受入時刻は価格の観測時刻ではありません。参考値・一部指標の更新を含みます。VIX・WTIは日次確定終値です。休場中や新しい終値の確定前は、更新しても値と基準日が変わらない場合があります。</small></div>
     <div class="iorow"><button class="btn grn" onclick="botSync(false)">⟳ 今すぐ同期</button><button class="btn" onclick="openSyncDetails()">接続詳細</button></div>
   </div>`;
 }
 function openSyncDetails(){
   const st=S.sync||{};const base=S.settings.apiBase||location.origin;
-  openModal(`<h3>DATA CONNECTION CENTER</h3>
-    <div class="conn-grid"><div class="conn-cell"><small>API ENDPOINT</small><b>${esc(base)}</b></div><div class="conn-cell"><small>STATUS</small><b>${esc(st.status||'idle')}</b></div><div class="conn-cell"><small>最終の新鮮データ</small><b>${fmtAt(st.lastSuccessAt)}</b></div><div class="conn-cell"><small>最終応答</small><b>${fmtAt(st.lastResponseAt||st.lastAttemptAt)}</b></div></div>
-    <div class="conn-detail">株価: ${esc((st.sources||[]).join(', ')||'未取得')}<br>為替: ${esc(st.fxSource||S.settings.fxSource||'manual')}${st.fxStale?'（古いキャッシュ）':''}<br>VIX / WTI: ${esc(syncMarketRegimeText(st))}<br><small>VIX・WTIは日次確定終値です。休場中や新しい終値の確定前は、更新しても値と基準日が変わらない場合があります。連続操作は短時間内ならキャッシュを再利用します（既定45秒）。</small><br>取得品質: ${st.quality?`${Math.round(st.quality.coveragePct||0)}%（LIVE ${st.quality.live??st.quality.fresh??0}・終値 ${st.quality.closeValid||0}・参考 ${st.quality.reference||0}・aged ${st.quality.aged||0}・stale ${st.quality.stale||0}・未検証 ${st.quality.unverified||0}・provider差 ${st.quality.consensusWarnings||0}・failed ${st.quality.failed||0}）`:'未計測'}<br>失敗銘柄: ${esc((st.failures||[]).join(', ')||'なし')}<br>古い銘柄: ${esc((st.stale||[]).join(', ')||'なし')}<br>SPYベンチマーク: ${st.benchmarkError?'取得失敗':st.benchmarkStale?'古いキャッシュ':'正常'}<br>TRACE ID: ${esc((st.requestIds||[]).join(', ')||'未取得')}<br>${st.lastError?'注意: '+esc(st.lastError):'最終同期は正常に完了しました'}<br>所要時間: ${Math.round(st.durationMs||0)}ms</div>
+  openModal(`<h3>DATA CONNECTION CENTER</h3><p class="conn-detail">詳細の数値・時刻はこの画面を開いた時点の記録です。同期後の最新詳細は、閉じて開き直すと確認できます。</p>
+    <div class="conn-grid"><div class="conn-cell"><small>API ENDPOINT</small><b>${esc(base)}</b></div><div class="conn-cell"><small>STATUS</small><b data-sync-status>${esc(st.status||'idle')}</b></div><div class="conn-cell"><small>最終データ受入（部分更新含む）</small><b>${fmtAt(st.lastSuccessAt)}</b></div><div class="conn-cell"><small>最終同期処理完了（失敗含む）</small><b>${fmtAt(st.lastResponseAt)}</b></div></div>
+    <div class="conn-detail">株価: ${esc((st.sources||[]).join(', ')||'未取得')}<br>為替: ${esc(st.fxSource||S.settings.fxSource||'manual')}${st.fxStale?'（古いキャッシュ）':''}<br>VIX / WTI: ${esc(syncMarketRegimeText(st))}<br><small>データ受入時刻は価格の観測時刻ではありません。参考値・一部指標の更新を含みます。VIX・WTIは日次確定終値です。休場中や新しい終値の確定前は、更新しても値と基準日が変わらない場合があります。連続操作は短時間内ならキャッシュを再利用します（既定45秒）。</small><br>取得品質: ${st.quality?`${Math.round(st.quality.coveragePct||0)}%（LIVE ${st.quality.live??st.quality.fresh??0}・終値 ${st.quality.closeValid||0}・参考 ${st.quality.reference||0}・aged ${st.quality.aged||0}・stale ${st.quality.stale||0}・未検証 ${st.quality.unverified||0}・provider差 ${st.quality.consensusWarnings||0}・failed ${st.quality.failed||0}）`:'未計測'}<br>失敗銘柄: ${esc((st.failures||[]).join(', ')||'なし')}<br>古い銘柄: ${esc((st.stale||[]).join(', ')||'なし')}<br>SPYベンチマーク: <span data-sync-benchmark>${esc(syncBenchmarkText(st))}</span><br>TRACE ID: ${esc((st.requestIds||[]).join(', ')||'未取得')}<br><span data-sync-outcome aria-live="polite">${esc(syncOutcomeText(st))}</span>${st.lastError?'<br>注意: '+esc(st.lastError):''}<br>所要時間: ${Math.round(st.durationMs||0)}ms</div>
     <div class="mbtns"><button class="btn ghost" onclick="closeModal()">閉じる</button><button class="btn" onclick="S.settings.apiBase='';save();closeModal();renderLog();toast('同一サーバー接続に戻しました')">同一サーバーに戻す</button><button class="btn grn" onclick="closeModal();botSync(false)">再試行</button></div>`);
 }
 function renderLog(){
@@ -3427,7 +3487,14 @@ function alarm(){beep(1200,.09,.07);setTimeout(()=>beep(900,.09,.07),130);setTim
 let lastAuto=Date.parse(S.sync?.lastSuccessAt||'')||0;
 let nextSyncAt=0,syncPromise=null;
 const wait=ms=>new Promise(resolve=>setTimeout(resolve,ms));
-function setSyncBusy(on){const b=$('#syncbtn');if(!b)return;b.disabled=on;b.classList.toggle('syncing',on);b.setAttribute('aria-busy',on?'true':'false')}
+function setSyncBusy(on){
+  const b=$('#syncbtn');if(b){b.disabled=on;b.classList.toggle('syncing',on);b.setAttribute('aria-busy',on?'true':'false')}
+  const st=S.sync||{},status=st.status==='syncing'?'partial':st.status||'idle',label={idle:'未接続',ok:'正常',partial:st.status==='syncing'?'同期中':'一部成功',error:'接続失敗'}[status]||'未接続';
+  document.querySelectorAll('[data-sync-outcome]').forEach(node=>{node.textContent=syncOutcomeText(st)});
+  document.querySelectorAll('[data-sync-benchmark]').forEach(node=>{node.textContent=syncBenchmarkText(st)});
+  document.querySelectorAll('[data-sync-status]').forEach(node=>{node.textContent=st.status||'idle'});
+  document.querySelectorAll('[data-sync-state]').forEach(node=>{node.textContent=label;node.className='conn-state '+status});
+}
 function syncErrorText(error){
   if(error?.status===401)return 'APIトークンが一致しません';
   if(error?.status===429)return 'アクセスが集中しています。少し待って再試行します';

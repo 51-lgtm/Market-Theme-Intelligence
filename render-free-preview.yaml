@@ -1,0 +1,48 @@
+# NEW isolated service only. Never attach this blueprint to the existing service.
+# Free preview: SQLite is ephemeral. No paid APIs, disks, databases or workers.
+services:
+  - type: web
+    name: us-command-astra-preview-new
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /healthz
+    envVars:
+      - key: ASTRA_ADMIN_PASSWORD
+        sync: false
+      - key: ASTRA_JWT_SECRET
+        generateValue: true
+      - key: COOKIE_SECURE
+        value: "true"
+      - key: ASTRA_HOST
+        value: 0.0.0.0
+      - key: ASTRA_DATABASE_PATH
+        value: /app/data/astra.sqlite3
+      - key: ASTRA_BACKGROUND_JOBS
+        value: "false"
+      - key: OPENAI_API_KEY
+        value: ""
+      - key: ANTHROPIC_API_KEY
+        value: ""
+      - key: FINNHUB_API_KEY
+        value: ""
+      - key: ALPHA_VANTAGE_API_KEY
+        value: ""
+      - key: OPENAI_AGENT_MODEL
+        value: ""
+      - key: OPENAI_MAX_CALLS_PER_DAY
+        value: "0"
+      - key: OPENAI_MAX_CALLS_PER_RUN
+        value: "0"
+      - key: AUTO_TRADE
+        value: "false"
+      - key: LIVE_TRADING
+        value: "false"
+      - key: PAPER_TRADING
+        value: "false"
+      - key: SHADOW_TRADING
+        value: "false"
+      - key: MANUAL_APPROVAL
+        value: "true"
+      - key: BROKER_MODE
+        value: shadow
