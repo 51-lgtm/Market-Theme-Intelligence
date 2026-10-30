@@ -1575,6 +1575,8 @@ function buildMarketRegimePayload(histories, retrievedAt) {
       synchronizedConfirmedSession: {
         available: Boolean(commonAsOf),
         current: synchronizationLagSessions === 0,
+        currentScope: 'latest-received-SPY-session-only',
+        calendarVerified: false,
         asOf: commonAsOf,
         latestSpyDate,
         lagSessions: synchronizationLagSessions
@@ -1623,6 +1625,9 @@ function buildMarketRegimePayload(histories, retrievedAt) {
       cache: 'refreshed',
       stale: false,
       observationStale,
+      calendarVerified: false,
+      latestSessionVerified: false,
+      freshnessScope: 'received-series-only; no exchange-calendar verification',
       observationAgeMs: ageMs,
       maximumObservationAgeMs: MARKET_REGIME_MAX_OBSERVATION_AGE_MS,
       synchronizationLagSessions,

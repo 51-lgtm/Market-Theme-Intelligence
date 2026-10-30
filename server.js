@@ -6,6 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const { MarketDataService, THEME_CATALOG, normalizeSymbol } = require('./market-data');
 const pkg = require('./package.json');
+const { OfficialRiskNews } = require('./official-risk-news');
 const { astraEvidence } = require('./astra-bridge');
 
 const APP_VERSION = pkg.version;
@@ -489,6 +490,7 @@ function createApp(options = {}) {
     finnhubKey: env.FINNHUB_API_KEY || ''
   });
   const fetchImpl = options.fetch || global.fetch;
+  const officialRiskNews = options.officialRiskNews || new OfficialRiskNews({ fetchImpl });
   const allowedOrigins = parseAllowedOrigins(env.ALLOWED_ORIGINS);
 
   app.disable('x-powered-by');
@@ -777,6 +779,16 @@ function createApp(options = {}) {
     } finally {
       req.removeListener('aborted', abort);
       res.removeListener('close', close);
+    }
+  });
+
+  app.get('/api/official-risk-news', marketRegimeRateLimiter, async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    try {
+      const payload = await officialRiskNews.get();
+      return res.status(payload.status === 'unavailable' ? 503 : 200).json(payload);
+    } catch (_) {
+      return res.status(503).json({status:'unavailable',items:[],retrievedAt:null});
     }
   });
 

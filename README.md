@@ -222,3 +222,31 @@ HTTPSログインとCSRFのOrigin確認には、Renderが自動設定する`REND
 P0の安全なShadow閉ループ基盤、P1決定論的Agent、P2主要画面を実装しました。Broker sandbox、真正なbid/ask・独立2社データ契約、長期Shadow蓄積、完成版point-in-timeバックテスト、Nigeria/IR詳細、Live、マルチユーザー、外部DBは未完成です。mockで接続済みと表示しません。実資金を扱う前に独立レビューと利用者自身の判断が必要です。
 
 検証件数、修正した安全性問題、未検証事項は[最終レビュー](docs/FINAL_REVIEW.md)を参照してください。配布ZIPはPowerShell 7で`./scripts/package-release.ps1`を実行して生成できます。
+
+
+### Local proposal: risk context / official announcements (2026-10-30)
+
+`GET /api/official-risk-news` adds Federal Reserve monetary-policy RSS titles,
+publication times and original links, separately from the daily risk heuristic.
+No sentiment score, price feed, AI-generated story or order integration is added.
+Source: https://www.federalreserve.gov/feeds/feeds.htm . The Board's public-domain
+redistribution/attribution policy: https://www.federalreserve.gov/disclaimer.htm .
+The original English title and agency attribution are preserved; no photos/logos
+or third-party articles are copied. No key or paid API is required. This limited
+feed is not breaking market-news coverage. The module uses a fixed URL, timeout,
+body cap, deduplication and validated Fed HTTPS links. Cache is 15 minutes; errors
+retain explicitly stale data for at most 7 days, not a newly timestamped result.
+
+Risk values and quote-provider permissions are not newly validated by this change.
+Yahoo's unofficial endpoint availability is NOT evidence of public redistribution
+permission; public rollout still needs a source/rights review. The existing rule
+weights are unchanged and uncalibrated, not crash probabilities or win rates.
+
+`calendarVerified:false` and `latestSessionVerified:false` explicitly expose that
+matching received SPY/VIX/WTI session dates do not prove the latest exchange
+session. No live open/closed state is fabricated. JST/ET clock and acquisition
+time are separate from the US session date. Holidays, early closes, simultaneous
+source delays and intraday developments remain limitations. Exact exchange-
+calendar verification and licensed live data are not implemented in this patch.
+
+Focused checks: `node --test test/risk-context.test.js test/official-risk-news.test.js test/official-risk-news-route.test.js`.

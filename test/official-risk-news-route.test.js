@@ -1,0 +1,5 @@
+'use strict';
+const test=require('node:test'),assert=require('node:assert/strict');const{createApp}=require('../server');
+async function run(status,action){const{app}=createApp({env:{NODE_ENV:'test'},marketData:{},officialRiskNews:{get:async()=>({status,items:[],retrievedAt:null,affectsRiskScore:false})}});const server=app.listen(0,'127.0.0.1');await new Promise(r=>server.once('listening',r));try{await action(`http://127.0.0.1:${server.address().port}`)}finally{await new Promise(r=>server.close(r))}}
+test('official material endpoint is no-store and does not feed score',async()=>run('ok',async base=>{const r=await fetch(base+'/api/official-risk-news');assert.equal(r.status,200);assert.equal(r.headers.get('cache-control'),'no-store');assert.equal((await r.json()).affectsRiskScore,false)}));
+test('official material unavailable is explicit 503, never invented news',async()=>run('unavailable',async base=>{const r=await fetch(base+'/api/official-risk-news');assert.equal(r.status,503);assert.deepEqual((await r.json()).items,[])}));
