@@ -2,6 +2,8 @@
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
+<meta name="app-release" content="2026-11-07-clarity-1">
+<script src="/app-updates.js" defer></script>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="description" content="日足・週足テクニカル、テーマ、ニュース、決算を統合し、SIMULATE専用の買い候補・監視・待機・回避を可視化する米国株司令室">
 <meta name="theme-color" content="#070b15">
@@ -733,7 +735,7 @@ html{scroll-padding-top:calc(var(--hud-h) + env(safe-area-inset-top) + 38px)}
 .holdings-status{color:var(--txt)}
 .holdings-counts{display:flex;flex-wrap:wrap;gap:6px;margin-top:12px}
 .holdings-counts span{padding:5px 9px;border:1px solid var(--line);border-radius:7px;font-size:.78rem}
-.holdings-counts .buy{color:#ffadc0}.holdings-counts .sell{color:#9ce4b6}
+.holdings-counts .buy{color:#9ce4b6}.holdings-counts .sell{color:#ffadc0}
 .holdings-alerts{padding:12px 14px;border:1px solid #9b4659;background:#211722;border-radius:12px;margin-bottom:12px;font-size:.8rem;line-height:1.65}
 .holdings-alerts strong{display:block;color:#ffb2c1}.holdings-alerts ul{margin:5px 0 0;padding-left:20px}.holdings-alerts li+li{margin-top:5px}
 .holdings-disclosure>summary{cursor:pointer;min-height:44px;display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:.9rem;font-weight:700;list-style:none}
@@ -753,12 +755,29 @@ html{scroll-padding-top:calc(var(--hud-h) + env(safe-area-inset-top) + 38px)}
 .holdings-quote{font-size:.76rem;line-height:1.7;color:var(--hold-muted);margin:8px 0 10px;overflow-wrap:anywhere}
 .holdings-quote b{color:var(--txt)}
 .holdings-tech{background:#f8fafc;color:#203044;border:1px solid #dbe3eb;border-radius:12px;padding:14px;margin:12px 0}
-.holdings-tech h3{font-size:1rem;margin:0 0 12px;line-height:1.4}
+.holdings-tech h3{font-size:1.18rem;margin:5px 0 8px;line-height:1.6;letter-spacing:0}
+.holdings-conclusion{border-left:4px solid #718198;padding:0 0 0 12px;margin-bottom:14px}
+.holdings-conclusion.buy{border-color:#36866d}.holdings-conclusion.sell{border-color:#bc5265}
+.holdings-conclusion>small{font-size:.72rem;color:#526174;font-weight:700}
+.holdings-conclusion p{font-size:.8rem;line-height:1.7;margin:5px 0 0;color:#43556b}
+.holdings-reading{margin:14px 0 0;display:grid;gap:9px}
+.holdings-reading>div{border-radius:7px;background:#fff;border:1px solid #dce4ed;padding:8px 10px}
+.holdings-reading dt{font-size:.76rem;font-weight:750;color:#354b65;margin:0 0 4px}
+.holdings-reading dd{font-size:.83rem;line-height:1.75;margin:0;color:#24374c;overflow-wrap:anywhere}
+.holdings-reading .caution{background:#fff8eb;border-color:#e9d5ab}
+.holdings-horizons{margin:12px 0 0;padding-top:3px}
+.holdings-horizons p{font-size:.78rem;line-height:1.8;color:#43556b;margin:7px 0 0;overflow-wrap:anywhere}
+.holdings-horizons b{color:#263e56}
+.holdings-risk-reading{font-size:.85rem;line-height:1.8;color:var(--txt);margin:10px 0 12px}
+.holdings-risk-reading b{color:var(--cyan)}
+#risk-engine .risk-metric small{letter-spacing:0;font-size:.7rem;line-height:1.6}
+#risk-engine .risk-metric i{line-height:1.7}
+#risk-engine .riskvd{font-size:.76rem;line-height:1.8}
 .holdings-frame-row{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
 .holdings-frame{min-width:0}.holdings-frame-head{font-size:.85rem;font-weight:700;display:flex;align-items:center;justify-content:space-between;gap:5px;margin-bottom:6px}
 .holdings-frame-head small{font-size:.7rem;font-weight:500;color:#59677a}
 .holdings-direction{display:flex;justify-content:center;align-items:center;gap:6px;min-height:46px;border-radius:7px;font-size:1rem;font-weight:750;background:#e9edf2;color:#526072}
-.holdings-direction.buy{background:#f8d1da;color:#a92243}.holdings-direction.sell{background:#cee7d8;color:#226337}.holdings-direction.unavailable{background:#edf0f4;color:#606c7c;border:1px solid #d5dde7}
+.holdings-direction.buy{background:#dcefe8;color:#215b49}.holdings-direction.sell{background:#f8e1e5;color:#8d3045}.holdings-direction.unavailable{background:#edf0f4;color:#606c7c;border:1px solid #d5dde7}
 .holdings-asof{font-size:.72rem;line-height:1.65;color:#59677a;margin:5px 0 0;overflow-wrap:anywhere}
 .holdings-evidence-title{font-size:.85rem;font-weight:700;margin:14px 0 8px}
 .holdings-indicators{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:0}
@@ -1385,10 +1404,10 @@ function renderPos(){
         <span class="pos-tk">${esc(p.ticker)}</span>
         <span class="badge ${p.role==='core'?'core':'trade'}">${p.role==='core'?'CORE':'TRADE'}</span>
         <span class="pos-nm">${esc(p.name||'')}</span>
-        <div class="pos-price"><b>${hasPrice?(isUsd?'$':'')+live.toFixed(2)+(isUsd?'':' '+esc(currency)):'取得待ち'}</b><small class="${(p.changePct||0)>=0?'grnc':'redc'}">前日比 ${hasPrice&&p.changePct!=null?pct(Number(p.changePct)):'未取得'}</small></div>
+        <div class="pos-price"><b>${hasPrice?(isUsd?'$':'')+live.toFixed(2)+(isUsd?'':' '+esc(currency)):'取得待ち'}</b><small class="${(p.changePct||0)>=0?'grnc':'redc'}">前日比 ${hasPrice&&p.changePct!=null?pct(Number(p.changePct)):'未取得'}</small><small>${esc(xrayQuoteQuality(p,{supportedCurrency:isUsd,currency,validMark:hasPrice&&isUsd}).label)}</small></div>
       </div>
-      ${holdingsQuoteMeta(p)}
       <div data-holdings-symbol="${esc(p.ticker)}" data-holdings-key="${esc(p.id)}">${holdingsTechnicalCard(holdingsTechnicalResult(p.ticker,currentInput),p.id)}</div>
+      ${holdingsQuoteMeta(p)}
       <div class="pos-mid"><span><b>${p.shares}</b>株 @ ${isUsd?'$':''}${p.avgCost} ${isUsd?'':esc(currency)}</span><span>取得価額 <b>${money(c)}</b></span>${sparkMarkup?`<button type="button" class="sparkbox" aria-label="${esc(p.ticker)}の参考チャート（期間未確認）を開く" title="参考チャート・期間と日時は未確認。日足指標の算出には使いません" onclick="chartModal('${p.ticker}')">${sparkMarkup}</button><span>参考チャート・期間未確認</span>`:''}</div>
       <div class="pos-pnl"><span class="pnl-label">取得来損益</span><span class="big">${hasPrice?money(pl):'損益 N/A'}</span><span class="pct">${hasPrice&&c>0?pct(plp):'損益率 N/A'}</span><span class="jpy">${!hasPrice?'現在値未取得・取得価額で代用しません':isUsd?(fxDisplayReady?fmtJpy(pl*C.fx):'為替未確認・JPY N/A'):'JPY換算未対応'}</span></div>
       <div class="chips">
@@ -2541,7 +2560,19 @@ function holdingsTechnicalFrame(result,frame,now=Date.now()){
   const provenanceReady=result?.qualityAdjusted===true&&(frame!=='weekly'||period.completedOnly===true);
   if(!provenanceReady)context.status='unavailable';
   const verdict=technicalConsensus(period,frame,context,now),time=technicalTimestamp(period.asOf),age=now-time;
-  if(result&&!provenanceReady)verdict.reason=result.qualityAdjusted!==true?'調整済み価格を確認できないため、指標の値・方向を表示しません。':'完成週のみのデータと確認できないため、週足の値・方向を表示しません。';
+  if(verdict.tone==='unavailable'){
+    const name=frame==='daily'?'日足':'週足',missing=[];
+    if(typeof period.rsi14!=='number'||!Number.isFinite(period.rsi14)||period.rsi14<0||period.rsi14>100)missing.push('勢い（RSI）');
+    if(typeof period.macd?.histogram!=='number'||!Number.isFinite(period.macd.histogram))missing.push('勢いの変化（MACD）');
+    if([period.price,period.ema20,period.ema50].some(v=>typeof v!=='number'||!Number.isFinite(v)||v<=0))missing.push('終値・20/50本平均');
+    if(!result)verdict.reason='分析データが未取得です。「分析を更新」で日足・週足を取得してください。';
+    else if(result.stale||period.stale||[result.status,result.technicalStatus,result.indicatorsStatus].includes('stale'))verdict.reason='保存された分析が古いため、現在の方向は判断できません。「分析を更新」で再取得してください。';
+    else if(!provenanceReady)verdict.reason=result.qualityAdjusted!==true?'調整済み価格を確認できないため、指標の値・方向を表示しません。':'完成週のみのデータと確認できないため、週足の値・方向を表示しません。';
+    else if(!Number.isFinite(time)||age< -300000)verdict.reason=`${name}の基準日が未取得、または不正です。取得時刻だけでは方向を判断できません。`;
+    else if(age>(frame==='daily'?4:14)*864e5)verdict.reason=`${name}の基準日 ${String(period.asOf).slice(0,10)} が鮮度上限（${frame==='daily'?4:14}暦日）を超えています。再取得が必要です。`;
+    else if(missing.length)verdict.reason=`${name}の${missing.join('・')}が不足または不正です。そろうまで方向は判断できません。`;
+    else verdict.reason=`${name}の取得・計算が完了したことを確認できません。値があっても方向は判断しません。`;
+  }
   const evidenceReady=!!result&&provenanceReady&&['ready','partial'].includes(result.status)&&!result.stale&&!['stale','error','unavailable'].includes(result.technicalStatus)&&!['stale','error','unavailable'].includes(result.indicatorsStatus)&&!period.stale&&['ok','ready','partial'].includes(period.status)&&Number.isFinite(time)&&age>=-300000&&age<=(frame==='daily'?4:14)*864e5;
   return{period,verdict,evidenceReady,date:Number.isFinite(time)?String(period.asOf).slice(0,10):'未取得'};
 }
@@ -2555,22 +2586,65 @@ function holdingsTechnicalOverview(currentInput){
   const symbols=[...new Set((S.positions||[]).filter(p=>typeof p.shares==='number'&&p.shares>0).map(p=>normalizeTicker(p.ticker)))];
   const counts={buy:0,sell:0,neutral:0,unavailable:0};let weeklyReady=0;
   symbols.forEach(symbol=>{const result=holdingsTechnicalResult(symbol,currentInput);counts[holdingsTechnicalFrame(result,'daily').verdict.tone]++;if(holdingsTechnicalFrame(result,'weekly').verdict.tone!=='unavailable')weeklyReady++});
-  const status=!symbols.length?'保有を追加すると、銘柄ごとの指標をここで確認できます。':BuySignals.loading?'日足・週足を分析中。完了まで以前の方向判定は表示しません。':BuySignals.error?BuySignals.error:!currentInput?'分析は未取得、または入力が変わりました。「分析を更新」で取得してください。':`日足 ${symbols.length-counts.unavailable}/${symbols.length}銘柄・週足 ${weeklyReady}/${symbols.length}銘柄の方向を評価可能。`;
-  return `<div class="holdings-head"><h2>保有株のテクニカル</h2><button class="btn" type="button" data-holdings-focus="refresh" onclick="fetchBuySignals(true)" ${BuySignals.loading||!symbols.length?'disabled':''}>${BuySignals.loading?'分析中…':'分析を更新'}</button></div><p class="holdings-copy">日足・週足の方向と、その根拠を確認。表示専用で売買の推奨ではありません。</p><p class="holdings-copy">日足の方向（銘柄数）</p><div class="holdings-counts" aria-label="保有銘柄の日足方向・銘柄数"><span class="buy">買い方向 ${counts.buy}</span><span class="neutral">中立 ${counts.neutral}</span><span class="sell">売り方向 ${counts.sell}</span><span>未取得 ${counts.unavailable}</span></div><p class="holdings-status" role="status" aria-live="polite">${esc(status)}</p><p class="holdings-copy">既存データで手動更新・最大20銘柄。取得時刻と分析基準日は別です。短期足・月足は未取得。</p>`;
+  const status=!symbols.length?'保有を追加すると、銘柄ごとの見立てを確認できます。':BuySignals.loading?'日足・週足を分析中。完了まで以前の方向判定は表示しません。':BuySignals.error?BuySignals.error:!currentInput?'分析は未取得、または入力が変わりました。「分析を更新」で取得してください。':`日足 ${symbols.length-counts.unavailable}/${symbols.length}銘柄・週足 ${weeklyReady}/${symbols.length}銘柄を確認。`;
+  return `<div class="holdings-head"><h2>保有株、今どう見る？</h2><button class="btn" type="button" data-holdings-focus="refresh" onclick="fetchBuySignals(true)" ${BuySignals.loading||!symbols.length?'disabled':''}>${BuySignals.loading?'分析中…':'分析を更新'}</button></div>${symbols.length>1?`<div class="holdings-counts" aria-label="保有銘柄の日足方向・銘柄数"><span class="buy">上向き ${counts.buy}</span><span class="neutral">方向まちまち ${counts.neutral}</span><span class="sell">下向き ${counts.sell}</span><span>判断できない ${counts.unavailable}</span></div>`:''}<p class="holdings-status" role="status" aria-live="polite">${esc(status)}</p><details class="holdings-disclosure holdings-tech-more" data-holdings-details="overview"><summary data-holdings-focus="overview">表示の範囲・更新について</summary><p class="holdings-copy">日足の方向を銘柄数で集計し、保有金額や売買判断へ合成しません。既存データで手動更新・最大20銘柄。取得時刻と分析基準日は別です。短期足・月足は未取得。</p></details>`;
 }
 function holdingsIndicatorGrid(frame,label){
   const p=frame.period,valid=(value,min=-Infinity,max=Infinity)=>frame.evidenceReady&&typeof value==='number'&&Number.isFinite(value)&&value>=min&&value<=max;
   const number=(value,decimals=2,min=-Infinity,max=Infinity)=>valid(value,min,max)?value.toFixed(decimals):'未取得';
   const price=value=>valid(value,Number.MIN_VALUE)?'$'+value.toFixed(2):'未取得';
-  const rsiNote=!valid(p.rsi14,0,100)?'値・鮮度を確認':p.rsi14>=70?'過熱域':p.rsi14<=30?'売られすぎ域':'0〜100の勢い指標';
+  const rsiNote=!valid(p.rsi14,0,100)?'値・鮮度を確認':p.rsi14>70?'過熱域':p.rsi14<30?'売られすぎ域':'0〜100の勢い指標';
   return `<dl class="holdings-indicators"><div><dt>RSI（14・${label}）</dt><dd>${number(p.rsi14,1,0,100)}<small>${rsiNote}</small></dd></div><div><dt>MACDヒストグラム</dt><dd>${number(p.macd?.histogram,4)}<small>12 / 26 / 9・${label}</small></dd></div><div><dt>出来高 RVOL20</dt><dd>${valid(p.rvol20,0)?p.rvol20.toFixed(2)+'倍':'未取得'}<small>直前20本の平均比</small></dd></div><div><dt>EMA20（${label}）</dt><dd>${price(p.ema20)}</dd></div><div><dt>EMA50（${label}）</dt><dd>${price(p.ema50)}</dd></div><div><dt>EMA200（${label}）</dt><dd>${price(p.ema200)}</dd></div></dl>`;
+}
+function holdingsDirectionLabel(frame){return{buy:'上向き',sell:'下向き',neutral:'方向まちまち',unavailable:'判断できない'}[frame.verdict.tone]||'判断できない'}
+function holdingsPlainReading(daily,weekly){
+  const tone=daily.verdict.tone,other=weekly.verdict.tone,p=daily.period;
+  if(tone==='unavailable')return{headline:'今は、方向を判断できません。',reason:daily.verdict.reason,support:daily.evidenceReady?'取得済みの指標だけでは方向を決めません。':'鮮度と計算条件を確認できる日足がありません。',caution:other==='unavailable'?'週足も未評価です。'+weekly.verdict.reason:`週足は${holdingsDirectionLabel(weekly)}ですが、日足の代わりにはしません。`,cautionBrief:other==='unavailable'?'未取得は、中立・安全という意味ではありません。':`週足は${holdingsDirectionLabel(weekly)}ですが、日足の代わりにはしません。`,change:'日足の鮮度・計算条件と、勢い・平均線の指標がそろった時点で再評価します。'};
+  const ema=p.price>p.ema20&&p.ema20>p.ema50?1:p.price<p.ema20&&p.ema20<p.ema50?-1:0;
+  const rsi=p.rsi14>=55&&p.rsi14<=70?1:p.rsi14>=30&&p.rsi14<=45?-1:0,macd=Math.sign(p.macd.histogram);
+  const signals=[
+    {direction:ema,text:ema===1?'株価は20日平均より上、20日平均も50日平均より上。':ema===-1?'株価は20日平均より下、20日平均も50日平均より下。':'株価と20日・50日平均の並びは、同じ方向にそろっていません。'},
+    {direction:rsi,text:rsi===1?'最近の上げが下げより優勢な範囲です（RSI）。':rsi===-1?'最近の下げが上げより優勢な範囲です（RSI）。':p.rsi14>70?'最近の上げが大きく、過熱域です（RSI）。':p.rsi14<30?'最近の下げが大きく、売られすぎの範囲です（RSI）。':'上げ下げの勢いに、はっきりした偏りはありません（RSI）。'},
+    {direction:macd,text:macd>0?'勢いの変化も上向き側です（MACD）。':macd<0?'勢いの変化も下向き側です（MACD）。':'勢いの変化は中立です（MACD）。'}
+  ];
+  const wanted=tone==='buy'?1:tone==='sell'?-1:0,support=(wanted?signals.filter(row=>row.direction===wanted):signals.filter(row=>row.direction!==0)).map(row=>row.text).join(' ')||signals[0].text;
+  const neutralPrimary=tone==='neutral'?signals.find(row=>row.direction!==0):null,neutralOpposite=neutralPrimary?signals.find(row=>row.direction===-neutralPrimary.direction):null;
+  const caution=[];
+  if(tone==='neutral'){if(neutralOpposite)caution.push(neutralOpposite.text.replace('勢いの変化も','勢いの変化は'));caution.push('上向き・下向きのどちらかにまとめられる状態ではありません。');if(p.rsi14>70||p.rsi14<30)caution.push(signals[1].text);}
+  else caution.push(...signals.filter(row=>row.direction!==wanted).map(row=>row.text));
+  if(other==='unavailable')caution.push('週足は判断できません。'+weekly.verdict.reason);
+  else if(other!==tone)caution.push(`週足は${holdingsDirectionLabel(weekly)}で、日足とそろっていません。`);
+  if(typeof p.rvol20!=='number'||!Number.isFinite(p.rvol20)||p.rvol20<0)caution.push('出来高の増減は未取得です。');
+  else if(p.rvol20<1)caution.push('出来高は直前20本の平均より少なめです。');
+  if(!caution.length)caution.push('価格指標に逆向きの材料はありませんが、決算・最新ニュースは未評価です。');
+  const headline=tone==='neutral'?'日足の方向は、まだそろっていません。':other===tone?`日足も週足も、${holdingsDirectionLabel(daily)}です。`:other==='unavailable'?`日足は${holdingsDirectionLabel(daily)}。週足は判断できません。`:`日足は${holdingsDirectionLabel(daily)}。週足は${holdingsDirectionLabel(weekly)}です。`;
+  const reason=other!==tone&&other!=='unavailable'&&tone!=='neutral'?'時間軸で見え方が違います。今後も同じ方向へ動くとは限りません。':'これは取得した価格指標の向きです。今後の上昇・下落や、買う・売るべきかを示すものではありません。';
+  const change=tone==='buy'?'次の確定日足で、株価が20日平均を下回る、または勢いの指標が下向きに変わると、この見立てを再確認します。':tone==='sell'?'次の確定日足で、株価が20日平均を上回る、または勢いの指標が上向きに変わると、この見立てを再確認します。':'次の確定日足で、株価・平均線の並びと勢いの指標が同じ方向にそろうかを確認します。';
+  return{headline,reason,support:support.split('。')[0]+'。',supportDetail:support,caution:caution.join(' '),cautionBrief:tone==='neutral'?caution[0]:other!=='unavailable'&&other!==tone?`週足は${holdingsDirectionLabel(weekly)}。日足と方向がそろっていません。`:caution[0],change};
+}
+function holdingsShortHorizon(result){
+  const h=result?.historicalAnalogs,frame=holdingsTechnicalFrame(result,'daily'),current=h&&frame.evidenceReady&&h.asOf===frame.period.asOf;
+  if(!frame.evidenceReady)return'短期の見通しは判断できません。日足の鮮度・調整済み価格を確認できるまで、過去比較も表示しません。';
+  if(h?.asOf&&h.asOf!==frame.period.asOf)return'過去比較と現在の日足の基準日が一致しません。再分析が必要です。';
+  const row=h?.horizons?.['20'],validRow=row&&row.bars===20&&row.sampleCount===h.sample?.selectedCount&&[row.medianPct,row.p25Pct,row.p75Pct].every(v=>typeof v==='number'&&Number.isFinite(v))&&row.p25Pct<=row.medianPct&&row.medianPct<=row.p75Pct;
+  if(current&&h.status==='ok'&&Number.isSafeInteger(h.sample?.selectedCount)&&h.sample.selectedCount>=8&&h.sample.selectedCount<=100&&validRow){
+    const pct=value=>(value>0?'+':'')+value.toFixed(2)+'%';
+    return`同じ銘柄で条件が似た過去${h.sample.selectedCount}件では、日足20本後（おおむね数週間）の中央値は${pct(row.medianPct)}、中央50%は${pct(row.p25Pct)}〜${pct(row.p75Pct)}でした。過去の結果であり、今後の予想や予測範囲ではありません。`;
+  }
+  if(current&&h.status==='insufficient'&&h.sample)return`条件が似た過去は${h.sample.selectedCount}件。8件未満のため分布を表示しません。短期の見通しは判断できません。`;
+  return`短期の見通しは判断できません。${h?.reason||'条件が似た過去の比較データは未取得です。'}`;
 }
 function holdingsTechnicalCard(result,key){
   const daily=holdingsTechnicalFrame(result,'daily'),weekly=holdingsTechnicalFrame(result,'weekly');
-  const frames=[['日足',daily],['週足',weekly]],p=daily.period,price=daily.evidenceReady&&typeof p.price==='number'&&Number.isFinite(p.price)&&p.price>0?'$'+p.price.toFixed(2):'未取得';
+  if(!result){
+    const position=(S.positions||[]).find(row=>row.id===key),unsupported=position&&String(position.currency||'USD').toUpperCase()!=='USD';
+    const pending=unsupported?'この銘柄の通貨には分析表示が未対応です。価格をUSDとして扱わず、方向も表示しません。':BuySignals.loading?'分析を更新中です。完了するまで以前の方向は表示しません。':BuySignals.error?'分析の取得に失敗しました。'+safeText(BuySignals.error,300):null;
+    if(pending){daily.verdict.reason=pending;weekly.verdict.reason=pending;}
+  }
+  const reading=holdingsPlainReading(daily,weekly),frames=[['日足',daily],['週足',weekly]],p=daily.period,price=daily.evidenceReady&&typeof p.price==='number'&&Number.isFinite(p.price)&&p.price>0?'$'+p.price.toFixed(2):'未取得';
   const supports=daily.evidenceReady?holdingsSupportCandidates(result?.supportCandidates):[],supportLabels={ema20:'EMA20',ema50:'EMA50',ema200:'EMA200',recent20Low:'直近20本の安値',pivotS1:'20本レンジの参考ピボットS1',pivotS2:'20本レンジの参考ピボットS2'};
   const supportText=supports.length?supports.map(row=>`${supportLabels[row.type]} $${row.value.toFixed(2)}`).join(' / '):'未取得';
-  return `<section class="holdings-tech" aria-label="${esc(result?.symbol||key)}のテクニカル根拠"><h3>テクニカルの方向</h3><div class="holdings-frame-row">${frames.map(([label,frame])=>`<div class="holdings-frame"><div class="holdings-frame-head">${label}<small>${label==='週足'?(frame.period.completedOnly===true?'完成週のみ':'完成週の確認未取得'):'1本＝1営業日'}</small></div><div class="holdings-direction ${frame.verdict.tone}"><span>${esc(frame.verdict.label)}</span><span aria-hidden="true">${frame.verdict.arrow}</span></div><p class="holdings-asof">基準日 ${esc(frame.date)}${frame.verdict.tone==='unavailable'?'<br>判定できるデータ不足・要確認':''}</p></div>`).join('')}</div><div class="holdings-evidence-title">日足の根拠 <span>・分析価格 ${price}</span></div>${holdingsIndicatorGrid(daily,'日足')}${daily.verdict.tone==='unavailable'?`<p class="holdings-tech-note">${esc(daily.verdict.reason)}${daily.evidenceReady?' 取得済みの指標のみ個別に表示しています。':''}</p>`:''}<p class="holdings-tech-note">基準日は米国取引日。日足4暦日・週足14暦日の鮮度上限内でも、最新営業日との一致・リアルタイム性は保証しません。</p><details class="holdings-tech-more holdings-disclosure" data-holdings-details="technical-${esc(key)}"><summary data-holdings-focus="technical-${esc(key)}">週足・支持帯・計算条件を見る</summary><div class="holdings-evidence-title">週足の根拠・基準日 ${esc(weekly.date)}</div>${holdingsIndicatorGrid(weekly,'週足')}${weekly.verdict.tone==='unavailable'?`<p>${esc(weekly.verdict.reason)}</p>`:''}<p><b>日足の支持候補：</b>${esc(supportText)}。既存の価格履歴から算出した参考水準です。反発の保証や注文価格ではありません。</p><p><b>抵抗帯：</b>未取得。<b>出来高の実数：</b>未取得（取得できたRVOLのみ表示）。分足・時間足・月足は未取得で、日足を代用しません。</p><p><b>出所：</b>${esc(result?.quality?.source||'未取得')} / ${result?.qualityAdjusted?'調整済み価格':'価格調整の確認未取得'}。日足と週足は別に集約し、保有全体の売買判断へ合成しません。</p><p>${esc(TECHNICAL_METHOD)}</p></details>${holdingsHistoricalHtml(result,key)}</section>`;
+  return `<section class="holdings-tech" aria-label="${esc(result?.symbol||key)}の値動きの見立て"><div class="holdings-conclusion ${daily.verdict.tone}"><small>今の値動き・売買推奨ではありません</small><h3>${esc(reading.headline)}</h3>${daily.verdict.tone==='unavailable'?`<p>${esc(reading.reason)}</p>`:''}</div><dl class="holdings-reading"><div><dt>理由</dt><dd>${esc(reading.support)}</dd></div><div class="caution"><dt>注意</dt><dd>${esc(reading.cautionBrief||reading.caution)}</dd></div></dl><p class="holdings-asof">日足 ${esc(daily.date)} / 週足 ${esc(weekly.date)}${weekly.period.completedOnly===true?'（完成週のみ）':'（完成週の確認未取得）'} 時点</p><div class="holdings-horizons"><p><b>見直す条件</b><br>${esc(reading.change)}</p><p><b>短期（数日〜数週間）</b><br>${esc(holdingsShortHorizon(result))}</p><p><b>長期（数か月〜年）は判断できません</b><br>業績推移・希薄化・評価倍率の根拠が未接続です。週足の方向だけでは長期を判断しません。</p></div><details class="holdings-tech-more holdings-disclosure" data-holdings-details="technical-${esc(key)}"><summary data-holdings-focus="technical-${esc(key)}">指標の数値・支持帯・計算条件</summary><p>${esc(reading.reason)}</p><p><b>根拠の補足：</b>${esc(reading.supportDetail||reading.support)}</p><p><b>注意の補足：</b>${esc(reading.caution)}</p><div class="holdings-frame-row">${frames.map(([label,frame])=>`<div class="holdings-frame"><div class="holdings-frame-head">${label}<small>${label==='週足'?(frame.period.completedOnly===true?'完成週のみ':'完成週の確認未取得'):'1本＝1営業日'}</small></div><div class="holdings-direction ${frame.verdict.tone}"><span>${esc(holdingsDirectionLabel(frame))}</span><span aria-hidden="true">${frame.verdict.arrow}</span></div><p class="holdings-asof">基準日 ${esc(frame.date)}</p></div>`).join('')}</div><div class="holdings-evidence-title">日足の根拠・分析価格 ${price}</div>${holdingsIndicatorGrid(daily,'日足')}${daily.verdict.tone==='unavailable'?`<p>${esc(daily.verdict.reason)}${daily.evidenceReady?' 取得済みの指標のみ個別に表示しています。':''}</p>`:''}<div class="holdings-evidence-title">週足の根拠・基準日 ${esc(weekly.date)}</div>${holdingsIndicatorGrid(weekly,'週足')}${weekly.verdict.tone==='unavailable'?`<p>${esc(weekly.verdict.reason)}</p>`:''}<p><b>日足の支持候補：</b>${esc(supportText)}。既存の価格履歴から算出した参考水準です。反発の保証や注文価格ではありません。</p><p><b>抵抗帯：</b>未取得。<b>出来高の実数：</b>未取得（取得できたRVOLのみ表示）。分足・時間足・月足は未取得で、日足を代用しません。</p><p><b>出所：</b>${esc(result?.quality?.source||'未取得')} / ${result?.qualityAdjusted?'調整済み価格':'価格調整の確認未取得'}。基準日は米国取引日。日足4暦日・週足14暦日の鮮度上限内でも、最新営業日との一致・リアルタイム性は保証しません。</p><p>20日・50日平均は最近の価格を重くみる移動平均（EMA）。RSIは55〜70を上向き、30〜45を下向き、それ以外を中立側として扱います。MACDはヒストグラムの正負、EMAは価格・20・50の順序を確認します。3系統が必要で、2系統以上が一致し反対がないと上向き／下向き、それ以外は方向まちまちです。週足は日ではなく週ごとに同じ計算をします。方向の強さ・将来の確率・売買判断へは置き換えません。</p></details>${holdingsHistoricalHtml(result,key)}</section>`;
 }
 function holdingsHistoricalHtml(result,key){
   const h=result?.historicalAnalogs,frame=holdingsTechnicalFrame(result,'daily'),current=h&&frame.evidenceReady&&h.asOf===frame.period.asOf;
@@ -3247,18 +3321,19 @@ function portfolioRiskSnapshot(state){
 }
 function riskEnginePanel(){
   const r=portfolioRiskSnapshot(S);if(!r.hasPositions)return'';
-  const stopped=!!(r.unsupportedCurrencyCount||r.missingPriceCount||r.splitSuspected),metric=(v,d=2)=>v==null?'—':v.toFixed(d)+'%',amount=v=>v==null?'N/A':fmtJpy(v),quality=stopped?'算定停止':!r.sufficient?'学習中':!r.coverageOk?'部分推定':r.stale?'要同期':'計測可能';
-  const qualityClass=!r.sufficient||!r.coverageOk?'redc':r.stale?'ambc':'grnc',mode=stopped?'未確定値をゼロ扱いせず停止':r.mode==='jpy'?'円換算（株式＋USD現金＋JPY現金）':'USD建て（為替変動を除外）';
-  return `<div class="panel" id="risk-engine"><div class="ptitle">RISK ENGINE 95<span class="r ${qualityClass}">${quality}</span></div>
+  const stopped=!!(r.unsupportedCurrencyCount||r.missingPriceCount||r.splitSuspected),metric=(v,d=2)=>v==null?'未評価':v.toFixed(d)+'%',amount=v=>v==null?'円換算 未評価':fmtJpy(v),quality=stopped?'算定停止':!r.sufficient?'履歴不足':!r.coverageOk?'一部のみ':r.stale?'古い値・要同期':'参考計算あり';
+  const qualityClass=!r.sufficient||!r.coverageOk?'redc':r.stale?'ambc':'mut',mode=stopped?'未確定値をゼロ扱いせず停止':r.mode==='jpy'?'円換算（株式＋USD現金＋JPY現金）':'USD建て（為替変動を除外）';
+  const summary=!r.decisionReady?'保有全体のリスクは判断できません。'+((r.reason||[]).join('。')||'計算に必要なデータが不足しています。'):`現在の保有を過去の価格に当てはめると、値動きの下側約5%から計算した損失の参考値は、境目が${metric(r.varPct)}、その側の平均が${metric(r.expectedShortfallPct)}でした。今後の損失予測ではありません。`;
+  return `<div class="panel" id="risk-engine"><div class="ptitle">保有全体の過去の値動き<span class="r ${qualityClass}">${quality}</span></div><p class="holdings-risk-reading">${esc(summary)}</p>
     <div class="risk-metrics">
-      <div class="risk-metric"><small>1-DAY HIST VaR</small><b class="${r.varPct>3?'redc':''}">${metric(r.varPct)}</b><i>${amount(r.varJpy)}</i></div>
-      <div class="risk-metric"><small>EXPECTED SHORTFALL</small><b class="${r.expectedShortfallPct>5?'redc':''}">${metric(r.expectedShortfallPct)}</b><i>${amount(r.expectedShortfallJpy)}</i></div>
-      <div class="risk-metric"><small>ANNUAL VOL</small><b class="${r.annualVolPct>60?'ambc':''}">${metric(r.annualVolPct,1)}</b><i>日次×√252</i></div>
-      <div class="risk-metric"><small>BETA</small><b>${r.beta==null?'—':r.beta.toFixed(2)}</b><i>USD NAV vs SPY</i></div>
-      <div class="risk-metric"><small>HISTORY COVER</small><b class="${r.coverageOk?'grnc':'redc'}">${r.coveragePct==null?'—':r.coveragePct.toFixed(0)+'%'}</b><i>${r.sampleCount||0} returns</i></div>
+      <div class="risk-metric"><small>大きな下落側の境目<br>過去95% VaR</small><b>${metric(r.varPct)}</b><i>${amount(r.varJpy)}<br>最大損失ではありません</i></div>
+      <div class="risk-metric"><small>その側の平均損失<br>Expected Shortfall</small><b>${metric(r.expectedShortfallPct)}</b><i>${amount(r.expectedShortfallJpy)}<br>下側 ${r.tailCount||0}件の平均</i></div>
+      <div class="risk-metric"><small>値動きのばらつき<br>年率換算ボラティリティ</small><b>${metric(r.annualVolPct,1)}</b><i>日次×√252<br>1年後の損失率ではありません</i></div>
+      <div class="risk-metric"><small>米国市場との連動の傾き<br>β・対SPY</small><b>${r.beta==null?'未評価':r.beta.toFixed(2)}</b><i>USD建てでの過去比較<br>次の値動きの倍率ではありません</i></div>
+      <div class="risk-metric"><small>履歴のある保有の割合</small><b>${r.coveragePct==null?'未評価':r.coveragePct.toFixed(0)+'%'}</b><i>変化率 ${r.sampleCount||0}件<br>安全性の点数ではありません</i></div>
     </div>
-    <div class="risk-quality"><b>DATA SCOPE</b><span>${esc(mode)}・${esc((r.reason||[]).join('／')||'履歴件数・価格鮮度・カバー率の基準を充足')}</span></div>
-    <div class="riskvd">現在の保有株数と現金を過去終値へ固定して逆算する95%ヒストリカル法です。VaRは最大損失ではなく、Expected Shortfallも将来を保証しません。入出金・売買履歴・税・手数料は再現せず、投資助言ではありません。</div></div>`;
+    <div class="risk-quality"><b>計算の範囲</b><span>${esc(mode)}・${esc((r.reason||[]).join('／')||'履歴件数・取得時刻・カバー率の基準を充足')}</span></div>
+    <div class="riskvd">RISK ENGINE 95：95%は過去分布を区切る計算条件で、安全性の点数ではありません。現在の保有株数と現金を過去終値へ固定して逆算する95%ヒストリカル法です。履歴の正確な日付対応は未確認です。損失にならない算定結果は0%で表示します。VaRは最大損失ではなく、Expected Shortfallも将来を保証しません。入出金・売買履歴・税・手数料は再現せず、投資助言ではありません。</div></div>`;
 }
 function riskPanel(){return riskEnginePanel()}
 /* ---- MARKET ARENA（週間 vs S&P500） ---- */

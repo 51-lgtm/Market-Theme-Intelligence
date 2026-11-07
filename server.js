@@ -483,6 +483,10 @@ function createApp(options = {}) {
   const app = express();
   const rootDir = options.rootDir || __dirname;
   const { staticDir, indexPath } = resolveStaticFiles(rootDir);
+  // Public build metadata only. Never reads portfolio state or calls providers.
+  const pageRelease = fs.existsSync(indexPath)
+    ? (fs.readFileSync(indexPath, 'utf8').match(/<meta name="app-release" content="([a-zA-Z0-9-]{1,64})">/)?.[1] || null)
+    : null;
   const env = options.env || process.env;
   validateConfiguration(env);
   const marketData = options.marketData || new MarketDataService({
@@ -1137,6 +1141,11 @@ function createApp(options = {}) {
   };
 
   app.get('/sw.js', sendAsset('sw.js', 'no-cache, no-store, must-revalidate'));
+  app.get('/app-updates.js', sendAsset('app-updates.js', 'no-cache, no-store, must-revalidate'));
+  app.get('/app-release.json', (req, res) => {
+    res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.json({ release: pageRelease });
+  });
   app.get('/manifest.json', sendAsset('manifest.json', 'public, max-age=3600'));
   app.get('/icon-192.png', sendAsset('icon-192.png', 'public, max-age=604800, immutable'));
   app.get('/icon-512.png', sendAsset('icon-512.png', 'public, max-age=604800, immutable'));

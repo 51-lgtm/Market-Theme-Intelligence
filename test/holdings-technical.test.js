@@ -14,7 +14,7 @@ function context(){
 test('holdings uses real daily and weekly evidence with explicit periods, dates and units',()=>{
   const c=context(),out=c.holdingsTechnicalCard(result(),'fixture-a');
   for(const text of ['日足','週足','完成週のみ','2026-11-06','2026-10-30','RSI（14・日足）','60.0','0.2000','1.25倍','EMA20','EMA50','EMA200','$105.00','$100.00','$90.00','直前20本の平均比','直近20本の安値 $95.00','抵抗帯：</b>未取得','出来高の実数：</b>未取得','synthetic-fixture'])assert.ok(out.includes(text),text);
-  assert.match(out,/強い買い/);assert.doesNotMatch(out,/勝率|目標価格|TRADE GATE|take1|take2/);
+  assert.match(out,/日足も週足も、上向きです/);assert.doesNotMatch(out,/強い買い|強い売り/);assert.doesNotMatch(out,/勝率|目標価格|TRADE GATE|take1|take2/);
   assert.match(out,/<details[^>]+data-holdings-details="technical-fixture-a"/);
   assert.doesNotMatch(out,/<details[^>]+\sopen(?:\s|>)/);
 });
@@ -40,7 +40,7 @@ test('raw extra evidence is preserved without synthesis or coercion and supports
 });
 test('overview counts unique held symbols only, never holdings weight or overall buy advice',()=>{
   const c=context();c.S.positions.push({...c.S.positions[0],id:'duplicate'}, {ticker:'OTHER',shares:1});c.BuySignals.results.push(result({symbol:'WATCH-ONLY'}));
-  const out=c.holdingsTechnicalOverview(true);assert.match(out,/買い方向 1/);assert.match(out,/未取得 1/);assert.match(out,/日足 1\/2銘柄/);assert.match(out,/最大20銘柄/);assert.match(out,/onclick="fetchBuySignals\(true\)"/);
+  const out=c.holdingsTechnicalOverview(true);assert.match(out,/上向き 1/);assert.match(out,/判断できない 1/);assert.match(out,/日足 1\/2銘柄/);assert.match(out,/最大20銘柄/);assert.match(out,/onclick="fetchBuySignals\(true\)"/);
   assert.equal(c.holdingsTechnicalResult('DEMO',false),null);c.BuySignals.loading=true;assert.equal(c.holdingsTechnicalResult('DEMO',true),null);assert.match(c.holdingsTechnicalOverview(true),/分析中/);
   c.BuySignals.loading=false;c.BuySignals.status='unavailable';c.BuySignals.error='fixture error';assert.equal(c.holdingsTechnicalResult('DEMO',true),null);assert.match(c.holdingsTechnicalOverview(true),/fixture error/);
   c.S.positions=[];assert.match(c.holdingsTechnicalOverview(true),/保有を追加/);
@@ -55,7 +55,7 @@ test('real holdings renderer places evidence before collapsed risk while preserv
   const c=context(),root={innerHTML:'',querySelectorAll:()=>[]};
   Object.assign(c,{$:()=>root,calc:()=>({issues:[{sev:'crit',msg:'DEMO STOP要確認'},{sev:'warn',msg:'fixture warning'}],fx:150}),monMigrate:()=>{},monCalc:()=>({line:'fixture',stage:0}),monSVG:()=>'',spark:()=>'',fmtUsd:value=>'$'+value,fmtJpy:value=>'JPY'+value,pct:value=>value+'%',marketRegimeAnalysisIsOld:()=>false,positionSummaryHtml:()=>'<div>集計fixture</div>',riskPanel:()=>'<div id="risk-engine">risk fixture</div>',portfolioXrayPanel:()=>'<div id="portfolio-xray">xray fixture</div>',portfolioXrayMetrics:()=>({}),xrayGuidance:()=> 'guidance fixture',ranchPanel:()=>'<div>ranch fixture</div>',evoFlush:()=>{}});
   vm.runInNewContext(block('renderPos','stressScenarioSnapshot'),c);c.renderPos();const out=root.innerHTML;
-  assert.ok(out.indexOf('保有株のテクニカル')<out.indexOf('class="pos '));assert.ok(out.indexOf('holdings-tech')<out.indexOf('id="risk-engine"'));assert.ok(out.indexOf('DEMO STOP要確認')<out.indexOf('data-holdings-details="risk"'));
+  assert.ok(out.indexOf('保有株、今どう見る？')<out.indexOf('class="pos '));assert.ok(out.indexOf('holdings-tech')<out.indexOf('id="risk-engine"'));assert.ok(out.indexOf('DEMO STOP要確認')<out.indexOf('data-holdings-details="risk"'));
   assert.match(out,/<details[^>]+data-holdings-details="risk"/);assert.doesNotMatch(out,/<details[^>]+\sopen(?:\s|>)/);
   for(const text of ['前日比','取得来損益','openPos(\'fixture-a\')','openTradeGate()','openStressLab()','setCash(\'jpy\'','setCash(\'usd\''])assert.ok(out.includes(text),text);
   assert.doesNotMatch(block('renderPos','stressScenarioSnapshot'),/rsi14\(\(S.spark/);
@@ -63,8 +63,8 @@ test('real holdings renderer places evidence before collapsed risk while preserv
 });
 test('technical refresh changes only technical slots and preserves disclosure state',()=>{
   const c=context(),openNode={dataset:{holdingsDetails:'technical-fixture-a'},open:true},closedNode={dataset:{holdingsDetails:'risk'},open:false},slot={dataset:{holdingsSymbol:'DEMO',holdingsKey:'fixture-a'},innerHTML:''},overview={innerHTML:'',setAttribute:(key,value)=>{overview[key]=value}},root={querySelector:()=>overview,querySelectorAll:selector=>selector==='[data-holdings-details][open]'?[openNode]:selector==='[data-holdings-symbol]'?[slot]:selector==='[data-holdings-details]'?[openNode,closedNode]:[]};
-  Object.assign(c,{$:()=>root,document:{activeElement:null}});c.refreshHoldingsTechnicalView();assert.match(slot.innerHTML,/強い買い/);assert.equal(openNode.open,true);assert.equal(closedNode.open,false);assert.equal(overview['aria-busy'],'false');
-  c.BuySignals.loading=true;c.refreshHoldingsTechnicalView();assert.doesNotMatch(slot.innerHTML,/>強い買い</);assert.equal(overview['aria-busy'],'true');
+  Object.assign(c,{$:()=>root,document:{activeElement:null}});c.refreshHoldingsTechnicalView();assert.match(slot.innerHTML,/日足も週足も、上向きです/);assert.equal(openNode.open,true);assert.equal(closedNode.open,false);assert.equal(overview['aria-busy'],'false');
+  c.BuySignals.loading=true;c.refreshHoldingsTechnicalView();assert.doesNotMatch(slot.innerHTML,/>上向き</);assert.equal(overview['aria-busy'],'true');
 });
 
 test('weekly evidence requires explicitly completed weeks and raw prices are suppressed',()=>{
@@ -112,4 +112,76 @@ test('actual synthetic backend result survives normalization and renders histori
   vm.runInNewContext(definitions+formatters+block('normalizeBuySignalIndicator','buyTechnicalPeriod')+block('normalizeBuySignalResult','buySignalStatusLabel'),c);
   const normalized=c.normalizeBuySignalResult(raw);assert.equal(normalized.historicalAnalogs.status,'ok');assert.equal(normalized.historicalAnalogs.sample.selectedCount,26);
   const out=c.holdingsHistoricalHtml(normalized,'fixture');assert.match(out,/5取引足本後の中央値/);assert.match(out,/26件採用/);assert.match(out,/2026-11-06/);
+});
+
+test('first glance states a plain conclusion, one reason and a caution before any raw indicator grid',()=>{
+  const c=context(),out=c.holdingsTechnicalCard(result(),'fixture'),first=out.split('<details')[0];
+  for(const text of ['今の値動き','売買推奨ではありません','日足も週足も、上向きです','理由','株価は20日平均より上','注意','決算・最新ニュースは未評価','見直す条件','株価が20日平均を下回る','長期（数か月〜年）は判断できません','業績推移・希薄化・評価倍率'])assert.ok(first.includes(text),text);
+  assert.doesNotMatch(first,/holdings-indicators|holdings-frame-row|強い買い|強い売り|目標価格|勝率|成功率|買い増し|売却推奨/);
+  assert.ok(first.indexOf('<h3>')<first.indexOf('理由'));assert.ok(first.indexOf('理由')<first.indexOf('注意'));
+});
+test('opposing daily and weekly directions and neutral mixtures are described without a trade decision',()=>{
+  const c=context(),down=period({price:80,ema20:90,ema50:100,rsi14:40,macd:{histogram:-1},completedOnly:true});
+  const mixed=c.holdingsTechnicalCard(result({technicalPeriods:{daily:period(),weekly:down}}),'fixture').split('<details')[0];
+  assert.match(mixed,/日足は上向き。週足は下向き/);assert.match(mixed,/日足と方向がそろっていません/);assert.doesNotMatch(mixed,/売り|買い|反発する|上昇する/);
+  const lower=c.holdingsTechnicalCard(result({technicalPeriods:{daily:down,weekly:down}}),'fixture').split('<details')[0];
+  assert.match(lower,/日足も週足も、下向きです/);assert.match(lower,/株価は20日平均より下/);assert.match(lower,/株価が20日平均を上回る/);
+  const neutral=c.holdingsTechnicalCard(result({technicalPeriods:{daily:period({rsi14:40}),weekly:period()}}),'fixture').split('<details')[0];
+  assert.match(neutral,/日足の方向は、まだそろっていません/);assert.doesNotMatch(neutral,/日足も週足も、上向き/);
+});
+test('extreme RSI and quiet volume remain cautions, not reversal predictions',()=>{
+  const c=context();
+  for(const [rsi14,expected] of [[75,'過熱域'],[20,'売られすぎ']]){
+    const out=c.holdingsTechnicalCard(result({technicalPeriods:{daily:period({rsi14,rvol20:.5}),weekly:period()}}),'fixture');
+    assert.match(out,new RegExp(expected));assert.match(out,/出来高は直前20本の平均より少なめ/);assert.doesNotMatch(out,/反発する|下落する|買い時|売り時/);
+  }
+});
+test('unavailable conclusion explains the actual blocker and never promotes partial data',()=>{
+  const c=context(),first=r=>c.holdingsTechnicalCard(r,'fixture').split('<details')[0];
+  assert.match(first(null),/分析データが未取得.*分析を更新/);
+  assert.match(first(result({stale:true})),/保存された分析が古い/);
+  assert.match(first(result({qualityAdjusted:false})),/調整済み価格を確認できない/);
+  assert.match(first(result({technicalPeriods:{daily:period({rsi14:null}),weekly:period()}})),/勢い（RSI）が不足または不正/);
+  assert.match(first(result({technicalPeriods:{daily:period({asOf:'2026-10-01'}),weekly:period()}})),/鮮度上限（4暦日）/);
+  for(const r of [null,result({stale:true}),result({qualityAdjusted:false}),result({technicalPeriods:{daily:period({rsi14:null}),weekly:period()}})])assert.doesNotMatch(first(r),/日足も週足も、上向き|\$105.00|中央値は/);
+  c.BuySignals.loading=true;assert.match(first(null),/分析を更新中/);
+  c.BuySignals.loading=false;c.BuySignals.error='synthetic network failure';assert.match(first(null),/取得に失敗.*synthetic network failure/);
+  c.S.positions[0].currency='JPY';assert.match(c.holdingsTechnicalCard(null,'fixture-a'),/通貨には分析表示が未対応/);
+});
+test('visible short horizon uses only gated historical observations and names daily bars, not a forecast',()=>{
+  const c=context(),good=c.holdingsHistoricalAnalogs(historicalFixture(),'DEMO');
+  const out=c.holdingsShortHorizon(result({historicalAnalogs:good}));
+  assert.match(out,/同じ銘柄で条件が似た過去8件/);assert.match(out,/日足20本後（おおむね数週間）/);assert.match(out,/中央値は\+5.50%/);assert.match(out,/今後の予想や予測範囲ではありません/);assert.doesNotMatch(out,/20営業日|目標|勝率|上昇確率/);
+  for(const r of [result({stale:true,historicalAnalogs:good}),result({qualityAdjusted:false,historicalAnalogs:good}),result({historicalAnalogs:{...good,asOf:'2026-11-05'}})])assert.doesNotMatch(c.holdingsShortHorizon(r),/中央値|\+5.50%/);
+  const small={...good,status:'insufficient',sample:{...good.sample,selectedCount:7},horizons:null};assert.match(c.holdingsShortHorizon(result({historicalAnalogs:small})),/7件。8件未満/);assert.doesNotMatch(c.holdingsShortHorizon(result({historicalAnalogs:small})),/中央値/);
+  const rejected=c.holdingsHistoricalAnalogs({...historicalFixture(),methodVersion:'unsupported'},'DEMO');assert.doesNotMatch(c.holdingsShortHorizon(result({historicalAnalogs:rejected})),/中央値/);
+  for(const patch of [{medianPct:NaN},{medianPct:'5.5'},{p25Pct:99},{sampleCount:7},{bars:5}]){
+    const malformed={...good,horizons:{...good.horizons,20:{...good.horizons[20],...patch}}};
+    assert.doesNotMatch(c.holdingsShortHorizon(result({historicalAnalogs:malformed})),/中央値|NaN|Infinity/);
+  }
+});
+test('risk detail explains retrospective loss, dispersion and beta without interpreting them as forecasts',()=>{
+  const c=context();Object.assign(c,{fmtJpy:value=>'JPY'+value,portfolioRiskSnapshot:()=>({hasPositions:true,sufficient:true,coverageOk:true,decisionReady:true,sampleCount:40,tailCount:2,mode:'jpy',varPct:2,expectedShortfallPct:3,annualVolPct:25,beta:1.2,varJpy:200,expectedShortfallJpy:300,coveragePct:100,reason:[]})});
+  vm.runInNewContext(block('riskEnginePanel','riskPanel'),c);const out=c.riskEnginePanel();
+  for(const text of ['保有全体の過去の値動き','現在の保有を過去の価格に当てはめる','今後の損失予測ではありません','最大損失ではありません','1年後の損失率ではありません','次の値動きの倍率ではありません','95%は過去分布を区切る計算条件で、安全性の点数ではありません','日付対応は未確認'])assert.ok(out.includes(text),text);
+  c.portfolioRiskSnapshot=()=>({hasPositions:true,sufficient:false,decisionReady:false,reason:['価格未取得のため停止']});assert.match(c.riskEnginePanel(),/保有全体のリスクは判断できません。価格未取得のため停止/);
+});
+
+test('neutral first-glance caution prioritizes the observed daily conflict over the weekly difference',()=>{
+  const c=context(),first=p=>c.holdingsTechnicalCard(result({technicalPeriods:{daily:p,weekly:period({completedOnly:true})}}),'fixture').split('<details')[0];
+  const caution=out=>out.match(/<div class="caution"><dt>注意<\/dt><dd>(.*?)<\/dd>/)?.[1];
+  const mixed=first(period({rsi14:75,macd:{histogram:-.2}}));
+  assert.match(mixed,/日足の方向は、まだそろっていません/);assert.match(mixed,/株価は20日平均より上/);
+  assert.equal(caution(mixed),'勢いの変化は下向き側です（MACD）。');assert.doesNotMatch(caution(mixed),/週足/);
+  const rsiOpposes=first(period({rsi14:40}));assert.match(caution(rsiOpposes),/最近の下げが上げより優勢.*RSI/);
+  const noTrend=first(period({price:103,rsi14:60,macd:{histogram:-.2}}));assert.match(noTrend,/最近の上げが下げより優勢/);assert.match(caution(noTrend),/勢いの変化は下向き側.*MACD/);
+  const incomplete=first(period({rsi14:75,macd:{histogram:null}}));assert.match(incomplete,/方向を判断できません/);assert.doesNotMatch(caution(incomplete),/MACD.*下向き|勢いの変化は下向き/);
+});
+
+test('one holding keeps the overview to refresh and data status without redundant counts or explanation',()=>{
+  const c=context(),out=c.holdingsTechnicalOverview(true);
+  assert.match(out,/保有株、今どう見る？/);assert.match(out,/分析を更新/);assert.match(out,/日足 1\/1銘柄/);assert.match(out,/表示の範囲・更新について/);
+  assert.doesNotMatch(out,/holdings-counts|銘柄ごとに、今の方向・理由・見直す条件を確認/);
+  c.S.positions.push({...c.S.positions[0],id:'duplicate'});assert.doesNotMatch(c.holdingsTechnicalOverview(true),/holdings-counts/);
+  c.S.positions.push({id:'other',ticker:'OTHER',shares:1});assert.match(c.holdingsTechnicalOverview(true),/holdings-counts/);
 });

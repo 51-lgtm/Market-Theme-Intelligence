@@ -8,7 +8,7 @@ const html=fs.readFileSync(process.env.DASHBOARD_HTML||path.join(__dirname,'../i
 const block=(start,end)=>{const i=html.indexOf(`function ${start}(`),j=html.indexOf(`function ${end}(`,i+1);assert.ok(i>=0&&j>i);return html.slice(i,j)};
 const esc=value=>String(value).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;');
 
-test('rebuilt inline application parses',()=>{const scripts=[...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi)];assert.equal(scripts.length,1);assert.doesNotThrow(()=>new vm.Script(scripts[0][1]));});
+test('rebuilt inline application parses',()=>{const scripts=[...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi)].filter(match=>match[1].trim());assert.equal(scripts.length,1);assert.doesNotThrow(()=>new vm.Script(scripts[0][1]));});
 
 test('sync labels distinguish unknown, in progress, partial and failed states',()=>{
  const c={};vm.runInNewContext(block('syncOutcomeText','syncCenterPanel'),c);

@@ -31,9 +31,11 @@ const concurrentMergeBlock = () => {
 };
 
 test('inline application JavaScript parses successfully', () => {
-  const scripts = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi)].map(match => match[1]);
+  const scripts = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi)].map(match => match[1]).filter(source => source.trim());
   assert.equal(scripts.length, 1);
   assert.doesNotThrow(() => new vm.Script(scripts[0], { filename: 'index-inline.js' }));
+  assert.match(html, /<script src="\/app-updates.js" defer><\/script>/);
+  assert.doesNotThrow(() => new vm.Script(fs.readFileSync(path.join(root, 'app-updates.js'), 'utf8')));
   assert.doesNotMatch(html, /user-scalable=no/);
   assert.doesNotMatch(html, /fetch\('https:\/\/api\.anthropic\.com/);
   assert.match(html, /DATA CONNECTION/);
