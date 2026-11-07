@@ -270,7 +270,7 @@ function enforceSimulationEnvelope(payload) {
     'indicators', 'technical', 'theme', 'fundamental', 'earningsDays',
     'earningsBlocked', 'quality', 'riskReward', 'riskRewardDetail',
     'positionPlan', 'leveragedProduct', 'leverageStatus', 'leverageBlocked',
-    'chaseBlocked', 'reasons', 'warnings', 'provenance', 'backtest'
+    'chaseBlocked', 'reasons', 'warnings', 'provenance', 'backtest', 'historicalAnalogs'
   ]);
   let status = ['ok', 'partial', 'unavailable'].includes(clean.status)
     ? clean.status

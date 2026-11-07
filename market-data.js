@@ -6,6 +6,7 @@ const {
   SIMULATION_EXECUTION,
   TECHNICAL_METHOD_VERSION,
   buildBuySignalResult,
+  buildHistoricalAnalogs,
   detectLeveragedProduct,
   runTechnicalBacktest
 } = require('./technical-signals');
@@ -3027,6 +3028,7 @@ function technicalUnavailableResult(symbol, reason, kind = 'signal') {
   }));
   return {
     ...common,
+    historicalAnalogs: buildHistoricalAnalogs({}, { symbol: normalized }),
     dataStatus: 'unavailable',
     price: null,
     score: 0,

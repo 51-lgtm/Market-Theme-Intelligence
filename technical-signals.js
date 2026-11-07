@@ -1,7 +1,21 @@
 'use strict';
 
+const { createHash } = require('node:crypto');
+
 const TECHNICAL_METHOD_VERSION = 'technical-eight-factor-v1';
 const BACKTEST_METHOD_VERSION = 'technical-a-f-walkforward-v1';
+const HISTORICAL_ANALOG_METHOD_VERSION = 'same-symbol-daily-state-v1';
+const HISTORICAL_ANALOG_RULES = Object.freeze({
+  warmupBars: 200,
+  comparisonWindowBars: 20,
+  horizons: Object.freeze([5, 10, 20]),
+  minimumSamples: 8,
+  rsiBoundaries: Object.freeze([30, 45, 55, 70]),
+  minimumAtrRatio: 2 / 3,
+  maximumAtrRatio: 1.5,
+  maximumAgeDays: 7,
+  maximumCalendarGapDays: 7
+});
 const SIMULATION_EXECUTION = Object.freeze({
   mode: 'SIMULATE',
   autoOrder: false,
@@ -381,6 +395,269 @@ function calculateIndicatorSeries(values) {
     change20dPct: change(index, 20)
   }));
   return { bars, rows };
+}
+
+// Descriptive historical observations only. These features use no future bars,
+// news, current fundamentals, fitted weights, or trade-plan targets.
+function historicalAnalogState(row) {
+  if (!row || ![row.close, row.ema20, row.ema50, row.rsi14, row.atr14]
+    .every(value => finite(value) != null) || !(row.close > 0) || !(row.atr14 > 0)) {
+    return null;
+  }
+  const atrPct = (row.atr14 / row.close) * 100;
+  if (!Number.isFinite(atrPct) || !(atrPct > 0) || row.rsi14 < 0 || row.rsi14 > 100) return null;
+  const boundaries = HISTORICAL_ANALOG_RULES.rsiBoundaries;
+  const bucket = boundaries.findIndex(boundary => row.rsi14 < boundary);
+  const rsiBand = bucket < 0 ? boundaries.length : bucket;
+  return {
+    ema20Above50: row.ema20 > row.ema50,
+    rsiBand,
+    rsiBandLabel: ['0以上30未満', '30以上45未満', '45以上55未満', '55以上70未満', '70以上100以下'][rsiBand],
+    rsi14: row.rsi14,
+    atrPct
+  };
+}
+
+function historicalAnalogMatches(current, candidate) {
+  if (!current || !candidate || !(current.atrPct > 0)) return false;
+  const ratio = candidate.atrPct / current.atrPct;
+  return candidate.ema20Above50 === current.ema20Above50 &&
+    candidate.rsiBand === current.rsiBand &&
+    ratio >= HISTORICAL_ANALOG_RULES.minimumAtrRatio &&
+    ratio <= HISTORICAL_ANALOG_RULES.maximumAtrRatio;
+}
+
+function historicalAnalogQuantile(values, probability) {
+  const sorted = [...values].sort((left, right) => left - right);
+  const index = (sorted.length - 1) * probability;
+  const lower = Math.floor(index);
+  const upper = Math.ceil(index);
+  return sorted[lower] + (sorted[upper] - sorted[lower]) * (index - lower);
+}
+
+function buildHistoricalAnalogs(history = {}, options = {}) {
+  history = history && typeof history === 'object' ? history : {};
+  const rules = HISTORICAL_ANALOG_RULES;
+  const suppliedNow = finite(options.nowMs);
+  const nowMs = suppliedNow != null && Math.abs(suppliedNow) <= 8.64e15 ? suppliedNow : Date.now();
+  const maxHorizon = rules.horizons.at(-1);
+  const values = Array.isArray(history?.bars) ? history.bars : [];
+  const result = {
+    status: 'unavailable',
+    methodVersion: HISTORICAL_ANALOG_METHOD_VERSION,
+    symbol: String(options.symbol || '').trim().toUpperCase(),
+    reason: null,
+    reasonCode: null,
+    asOf: null,
+    retrievedAt: null,
+    evaluatedAt: new Date(nowMs).toISOString(),
+    source: history?.source || null,
+    inputId: null,
+    period: { start: null, end: null, bars: values.length },
+    currentState: null,
+    matchingRules: {
+      scope: 'same-symbol-daily-state',
+      warmupBars: rules.warmupBars,
+      comparisonWindowBars: rules.comparisonWindowBars,
+      horizons: [...rules.horizons],
+      emaRule: 'EMA20 > EMA50 の真偽が同じ（等しい場合はfalse）',
+      rsiBoundaries: [...rules.rsiBoundaries],
+      atrRatioRange: [rules.minimumAtrRatio, rules.maximumAtrRatio],
+      atrRule: '(過去のATR14/終値) ÷ (現在のATR14/終値) が2/3以上1.5以下',
+      selection: 'oldest-first; exclude overlapping 20-bar context plus 20-bar outcome intervals',
+      returnFormula: '100 * (adjustedClose[t+h] / adjustedClose[t] - 1)',
+      quantileMethod: 'linear interpolation at (n - 1) * p',
+      thresholdBasis: 'fixed display safeguard, not a statistical-power guarantee',
+      maximumAgeDays: rules.maximumAgeDays,
+      maximumCalendarGapDays: rules.maximumCalendarGapDays
+    },
+    sample: { evaluatedCount: 0, candidateCount: 0, selectedCount: 0,
+      overlapExcludedCount: 0, minimum: rules.minimumSamples },
+    horizons: Object.fromEntries(rules.horizons.map(horizon => [String(horizon), null])),
+    samples: [],
+    quality: {
+      priceMode: history?.priceMode || null,
+      sourceStatus: history?.status || null,
+      retrievalTimeStatus: 'unavailable',
+      cacheState: history?.cacheState || null,
+      cacheAgeMs: finite(history?.cacheAgeMs),
+      excludedOpenSession: history?.excludedOpenSession === true,
+      volumeUsed: false,
+      calendarVerified: false,
+      maxCalendarGapDays: null,
+      longCalendarGapCount: 0
+    },
+    unit: '取引足本後',
+    limitations: [
+      '同一銘柄の似た日足状態の過去観測です。将来予測・目標価格・売買損益ではありません。',
+      '25–75%範囲は過去観測の四分位範囲で、将来の予測区間や信頼区間ではありません。',
+      '期間重複を除いても独立標本ではありません。EMA・ATR・RSIは過去の共通履歴を使います。',
+      '取引所カレンダー未照合です。欠落日を完全には検出できず、5/10/20営業日後を保証しません。',
+      '現在取得できる調整済み価格を使用します。企業行動による過去値改訂と現在存続する銘柄への偏りがあります。',
+      '業績・評価倍率・決算・市場環境・売買コストは比較条件に含みません。長期上値や類似企業は評価していません。'
+    ],
+    analysisOnly: true,
+    tradeEligible: false
+  };
+  const unavailable = (reasonCode, reason) => ({ ...result, reasonCode, reason });
+  if (!values.length) return unavailable('missing_history', '比較に使える日足履歴を取得できませんでした。');
+  // A calculation timestamp or cache hit is not evidence of a provider fetch.
+  // Preserve only an explicit, validated source retrieval timestamp.
+  const retrievedValue = history.retrievedAt ?? history.retrieved_at;
+  if (retrievedValue != null) {
+    const retrievedMs = typeof retrievedValue === 'string' ? Date.parse(retrievedValue) : NaN;
+    const retrievedDate = typeof retrievedValue === 'string' ? retrievedValue.slice(0, 10) : '';
+    const retrievedDay = Date.parse(`${retrievedDate}T00:00:00Z`);
+    if (typeof retrievedValue !== 'string' ||
+        !/^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,6})?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/.test(retrievedValue) ||
+        !Number.isFinite(retrievedMs) || !Number.isFinite(retrievedDay) ||
+        new Date(retrievedDay).toISOString().slice(0, 10) !== retrievedDate || retrievedMs > nowMs) {
+      result.quality.retrievalTimeStatus = 'invalid';
+      return unavailable('invalid_retrieval_time', '取得日時が不正または現在より未来のため比較できません。');
+    }
+    result.retrievedAt = new Date(retrievedMs).toISOString();
+    result.quality.retrievalTimeStatus = 'verified';
+  }
+  if (typeof history.source !== 'string' || !history.source.trim()) {
+    return unavailable('missing_source', '履歴の取得元を確認できないため比較を停止しました。');
+  }
+  if (history.status != null && typeof history.status !== 'string') {
+    return unavailable('invalid_source_status', '履歴の取得状態を確認できないため比較を停止しました。');
+  }
+  if (history.interval && history.interval !== '1d') {
+    return unavailable('unsupported_interval', '比較には日足（1d）の履歴が必要です。');
+  }
+  if (history.stale === true || String(history.cacheState || '').toLowerCase().includes('stale') ||
+      String(history.status || '').toLowerCase() === 'stale') {
+    return unavailable('stale_history', '履歴が古い、または更新失敗時のキャッシュのため比較を停止しました。');
+  }
+  if (!['', 'ok', 'fresh'].includes(String(history.status || '').toLowerCase()) ||
+      history.partial === true || (finite(history.ohlcCoveragePct) != null && history.ohlcCoveragePct < 100)) {
+    return unavailable('incomplete_history', '履歴の取得失敗またはOHLC欠測が報告されているため比較できません。');
+  }
+  if (history.priceMode !== 'adjusted' || values.some(bar => bar?.priceMode !== 'adjusted')) {
+    return unavailable('unadjusted_history', '全期間で同一基準の調整済みOHLCが必要です。未調整・混在履歴は比較しません。');
+  }
+  if (history.currentSessionComplete === false || history.containsOpenSession === true) {
+    return unavailable('unconfirmed_session', '未確定の取引足が含まれるため比較できません。');
+  }
+  // Do not let sanitizeBars silently repair OHLC, drop missing observations,
+  // deduplicate dates, or reorder a malformed input for this analysis.
+  let previousDate = '';
+  let previousTimestamp = 0;
+  let previousDay = null;
+  for (const value of values) {
+    const date = typeof value?.sessionDate === 'string' ? value.sessionDate : value?.date;
+    const day = Date.parse(`${date}T00:00:00Z`);
+    const timestamp = value?.timestamp ?? (Number.isFinite(day) ? day / 1000 : null);
+    const prices = ['open', 'high', 'low', 'close'].map(key => value?.[key]);
+    if (typeof date !== 'string' || (Object.hasOwn(value, 'sessionDate') && typeof value.sessionDate !== 'string') ||
+        !/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(day) ||
+        new Date(day).toISOString().slice(0, 10) !== date || !(timestamp > 0) ||
+        typeof timestamp !== 'number' || !Number.isFinite(timestamp) ||
+        (Object.hasOwn(value, 'timestamp') && (typeof value.timestamp !== 'number' || !Number.isFinite(value.timestamp))) ||
+        !Number.isFinite(timestamp * 1000) || Math.abs(timestamp * 1000) > 8.64e15 ||
+        new Date(timestamp * 1000).toISOString().slice(0, 10) !== date ||
+        date <= previousDate || timestamp <= previousTimestamp ||
+        prices.some(price => typeof price !== 'number' || !Number.isFinite(price) || !(price > 0)) ||
+        prices[1] < Math.max(prices[0], prices[3]) || prices[2] > Math.min(prices[0], prices[3])) {
+      return unavailable('invalid_history', '日付の重複・順序異常または不正/欠測OHLCがあるため比較できません。');
+    }
+    if (previousDay != null) {
+      const gap = (day - previousDay) / 86_400_000;
+      result.quality.maxCalendarGapDays = Math.max(result.quality.maxCalendarGapDays || 0, gap);
+      if (gap > 4) result.quality.longCalendarGapCount += 1;
+    }
+    previousDate = date;
+    previousTimestamp = timestamp;
+    previousDay = day;
+  }
+  const bars = sanitizeBars(values);
+  result.asOf = bars.at(-1).sessionDate;
+  result.period = { start: bars[0].sessionDate, end: result.asOf, bars: bars.length };
+  result.inputId = 'sha256:' + createHash('sha256').update(JSON.stringify({
+    methodVersion: HISTORICAL_ANALOG_METHOD_VERSION,
+    symbol: result.symbol,
+    bars: bars.map(bar => [bar.sessionDate, bar.timestamp, bar.open, bar.high, bar.low, bar.close, bar.priceMode])
+  })).digest('hex');
+  if (result.quality.maxCalendarGapDays > rules.maximumCalendarGapDays) {
+    return unavailable('unverified_calendar_gap', '取引足の間隔が7暦日を超えています。休止・欠測をカレンダーで確認できないため比較を停止しました。');
+  }
+  if (previousTimestamp * 1000 > nowMs) {
+    return unavailable('future_history', '取得履歴に現在時刻より先の取引足があるため比較できません。');
+  }
+  if (result.retrievedAt && Date.parse(result.retrievedAt) < previousTimestamp * 1000) {
+    result.quality.retrievalTimeStatus = 'invalid';
+    return unavailable('invalid_retrieval_time', '取得日時が最終取引足より前のため履歴の整合性を確認できません。');
+  }
+  if (nowMs - Date.parse(`${result.asOf}T23:59:59Z`) > rules.maximumAgeDays * 86_400_000) {
+    return unavailable('stale_history', '最終日足が7日超古いため比較を停止しました。');
+  }
+  if (bars.length < rules.warmupBars + rules.comparisonWindowBars + maxHorizon) {
+    return unavailable('short_history', '指標の200本ウォームアップと、離隔した比較・結果期間に必要な240本の日足が不足しています。');
+  }
+  const { rows } = calculateIndicatorSeries(bars);
+  const current = historicalAnalogState(rows.at(-1));
+  if (!current) return unavailable('missing_indicators', 'EMA・RSI・ATRの計算に必要な価格変動または履歴が不足しています。');
+  const currentStart = bars.length - rules.comparisonWindowBars;
+  result.currentState = { ...current, comparisonStartDate: bars[currentStart].sessionDate,
+    asOf: result.asOf };
+  const selected = [];
+  let lastSelectedEnd = -1;
+  // The current 20-bar context is embargoed. All 20-bar future outcomes of
+  // candidates end strictly before it. Selection never reads those outcomes.
+  for (let index = rules.warmupBars - 1; index + maxHorizon < currentStart; index += 1) {
+    result.sample.evaluatedCount += 1;
+    const state = historicalAnalogState(rows[index]);
+    if (!historicalAnalogMatches(current, state)) continue;
+    result.sample.candidateCount += 1;
+    const start = index - rules.comparisonWindowBars + 1;
+    const end = index + maxHorizon;
+    if (start <= lastSelectedEnd) {
+      result.sample.overlapExcludedCount += 1;
+      continue;
+    }
+    selected.push({ index, start, end });
+    lastSelectedEnd = end;
+  }
+  result.sample.selectedCount = selected.length;
+  result.samples = selected.map(({ index, start, end }) => ({
+    startDate: bars[start].sessionDate,
+    signalDate: bars[index].sessionDate,
+    endDate: bars[end].sessionDate,
+    horizonEndDates: Object.fromEntries(rules.horizons.map(horizon => [String(horizon), bars[index + horizon].sessionDate])),
+    returnsPct: null
+  }));
+  if (selected.length < rules.minimumSamples) {
+    return { ...result, status: 'insufficient', reasonCode: 'too_few_matches',
+      reason: `期間重複を除いた類似局面は${selected.length}件で、表示基準の${rules.minimumSamples}件未満です。リターンの数値は表示しません。` };
+  }
+  // Only after selection is final do we read future returns. The summaries
+  // describe close-to-close adjusted-price changes, not executable trades.
+  const returnsByHorizon = Object.fromEntries(rules.horizons.map(horizon => [String(horizon), []]));
+  if (selected.some(({ index }) => rules.horizons.some(horizon =>
+    !Number.isFinite(((bars[index + horizon].close / bars[index].close) - 1) * 1_000_000)))) {
+    return unavailable('invalid_return', '価格比率を有限値で計算できないため比較結果を表示しません。');
+  }
+  result.samples.forEach((sample, position) => {
+    const index = selected[position].index;
+    sample.returnsPct = Object.fromEntries(rules.horizons.map(horizon => {
+      const value = ((bars[index + horizon].close / bars[index].close) - 1) * 100;
+      returnsByHorizon[horizon].push(value);
+      return [String(horizon), round(value, 4)];
+    }));
+  });
+  for (const horizon of rules.horizons) {
+    const values = returnsByHorizon[horizon];
+    result.horizons[horizon] = {
+      bars: horizon,
+      sampleCount: values.length,
+      medianPct: round(historicalAnalogQuantile(values, 0.5), 4),
+      p25Pct: round(historicalAnalogQuantile(values, 0.25), 4),
+      p75Pct: round(historicalAnalogQuantile(values, 0.75), 4)
+    };
+  }
+  return { ...result, status: 'ok', reasonCode: null, reason: null };
 }
 
 function indicatorSnapshot(row, timeframe, barCount, previous = null, recentRows = []) {
@@ -1273,6 +1550,7 @@ function buildBuySignalResult(input = {}) {
       vwap: indicators.vwap,
       volumeProfile: indicators.volumeProfile
     },
+    historicalAnalogs: buildHistoricalAnalogs(history, { symbol, nowMs }),
     theme,
     fundamental,
     earningsDays,
@@ -1648,6 +1926,8 @@ function runTechnicalBacktest(values, options = {}) {
 
 module.exports = {
   BACKTEST_METHOD_VERSION,
+  HISTORICAL_ANALOG_METHOD_VERSION,
+  HISTORICAL_ANALOG_RULES,
   KNOWN_LEVERAGED_SYMBOLS,
   KNOWN_NON_LEVERAGED_ETFS,
   SIGNAL_DEFINITIONS,
@@ -1657,6 +1937,7 @@ module.exports = {
   atrSeries,
   backtestSignalFlags,
   buildBuySignalResult,
+  buildHistoricalAnalogs,
   buildPositionPlan,
   calculateIndicatorSeries,
   calculateTechnicalIndicators,
@@ -1664,6 +1945,8 @@ module.exports = {
   emaSeries,
   evaluateEightSignals,
   fundamentalSignalFlags,
+  historicalAnalogMatches,
+  historicalAnalogState,
   indicatorSnapshot,
   isoWeekKey,
   macdSeries,
