@@ -2448,3 +2448,43 @@ td small {
     scroll-behavior: auto !important;
   }
 }
+
+/* Reference-style technical overview: colors describe indicators, not orders. */
+.technical-overview{container-type:inline-size;container-name:technical-summary;background:#fff;color:#18212c;border:1px solid #e2e7eb;border-radius:16px;padding:24px;margin:18px 0;min-width:0}
+.technical-overview h2{font-size:22px;line-height:1.4;margin:0 0 5px;font-weight:750;letter-spacing:.02em;color:#18212c}
+.technical-overview .technical-caption{font-size:12px;color:#66717e;margin:0 0 22px;line-height:1.7}
+.technical-frame-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:22px 12px}
+.technical-frame{min-width:0;text-align:center}
+.technical-frame-label{display:block;color:#6a717b;font-size:14px;margin-bottom:9px}
+.technical-verdict{display:flex;align-items:center;justify-content:center;gap:8px;min-height:64px;padding:10px 4px;border-radius:7px;font-size:18px;font-weight:700;white-space:nowrap}
+.technical-verdict.buy{background:#f8d1da;color:#b82e4c}
+.technical-verdict.sell{background:#cee7d8;color:#26733e}
+.technical-verdict.neutral{background:#e9edf2;color:#566171}
+.technical-verdict.unavailable{background:#f5f6f8;color:#737b86;border:1px solid #e1e5ea;font-size:15px;font-weight:600}
+.technical-overview .technical-note{font-size:12px;line-height:1.7;color:#66717e;margin:18px 0 12px}
+.technical-more{border-top:1px solid #e7ebef;padding-top:14px}
+.technical-more>summary{cursor:pointer;list-style:none;text-align:center;font-size:15px;font-weight:700;color:#18212c;padding:7px;min-height:40px}
+.technical-more>summary::-webkit-details-marker{display:none}
+.technical-more>summary::after{content:' ›';font-size:23px;vertical-align:-1px}
+.technical-more[open]>summary::after{content:' ⌄'}
+.technical-more>summary:focus-visible{outline:3px solid #3d78bd;outline-offset:3px;border-radius:4px}
+.technical-method,.technical-evidence{font-size:12px;line-height:1.9;color:#566171;overflow-wrap:anywhere}
+.technical-evidence{padding-left:20px}
+.technical-overview .buy-timeframe{background:#f5f7fa;border-color:#dde3e9;color:#18212c}
+.technical-overview .buy-timeframe h4,.technical-overview .buy-indicator small{color:#566171}
+@media(max-width:600px){.technical-overview{padding:18px 12px;border-radius:12px}.technical-overview h2{font-size:20px}.technical-frame-grid{gap:18px 7px}.technical-frame-label{font-size:12px}.technical-verdict{font-size:13px;min-height:54px;gap:2px}.technical-verdict.unavailable{font-size:12px}.technical-overview .technical-caption{margin-bottom:18px}}
+@media(max-width:350px){.technical-frame-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+/* Cards may be narrow even on a desktop viewport. Size to the card itself. */
+.technical-verdict>span:first-child{min-width:0;white-space:normal;overflow-wrap:anywhere}
+.technical-verdict>span[aria-hidden]{flex-shrink:0}
+@container technical-summary (max-width:420px){
+  .technical-frame-grid{gap:18px 6px}
+  .technical-frame-label{font-size:12px}
+  .technical-verdict{font-size:clamp(11px,4cqi,13px);min-height:54px;gap:2px;padding:10px 3px}
+  .technical-verdict.unavailable{font-size:12px}
+}
+@container technical-summary (max-width:280px){
+  .technical-frame-grid{column-gap:4px}
+  .technical-verdict{padding-inline:2px}
+  .technical-verdict>span[aria-hidden]{display:none}
+}

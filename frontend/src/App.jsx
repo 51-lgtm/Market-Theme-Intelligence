@@ -20,6 +20,28 @@ import {
   orderView,
 } from "./utils.js";
 
+import { TECHNICAL_FRAMES, technicalConsensus, TECHNICAL_METHOD } from "./technicalSummary.js";
+
+function TechnicalOverview({ technical, status }) {
+  const frames = TECHNICAL_FRAMES.map(([key, label]) => {
+    const result = technicalConsensus(technical[key], key, { status, technicalStatus: technical.status, stale: technical.stale });
+    return { ...result, key, label, verdict: result.label };
+  });
+  return <section className="technical-overview" aria-label="時間足別テクニカル分析">
+    <h2>テクニカル</h2>
+    <p className="technical-caption">時間足ごとの方向感を、ひと目で。</p>
+    <div className="technical-frame-grid">{frames.map(item => <div className="technical-frame" key={item.key}>
+      <span className="technical-frame-label">{item.label}</span>
+      <div className={`technical-verdict ${item.tone}`} title={item.reason}><span>{item.verdict}</span><span aria-hidden="true">{item.arrow}</span></div>
+    </div>)}</div>
+    <p className="technical-note">日足・週足のみ対応。短期足・月足は未接続です。未取得は中立ではありません。</p>
+    <details className="technical-more"><summary>追加のテクニカル分析</summary>
+      <p className="technical-method">{TECHNICAL_METHOD}</p>
+      <ul className="technical-evidence">{frames.map(item => <li key={item.key}>{item.label}：{item.verdict} · {item.reason}</li>)}</ul>
+    </details>
+  </section>;
+}
+
 const NAV = [
   ["dashboard", "grid", "司令室"],
   ["scanner", "scan", "スキャナー"],
@@ -1788,6 +1810,7 @@ function TickerDetail({
           </div>
         ))}
       </div>
+      <TechnicalOverview technical={tech} status={row.data_status} />
       <div className="detail-main">
         <Panel
           title="Price & Volume"

@@ -1304,8 +1304,11 @@ test('buy signal UI separates daily and weekly evidence, shows restrictions and 
   const cardSource = functionBlock('buySignalCard', 'addBuySignalShadow');
   const fetchSource = functionBlock('fetchBuySignals', 'renderBuy');
   const renderSource = functionBlock('renderBuy', 'renderMkt');
-  assert.match(cardSource, /buySignalIndicatorHtml\(result\.indicators\.daily,'日足'\)/);
-  assert.match(cardSource, /buySignalIndicatorHtml\(result\.indicators\.weekly,'週足'\)/);
+  const summarySource = functionBlock('technicalSummaryHtml', 'buySignalIndicatorHtml');
+  assert.match(cardSource, /technicalSummaryHtml\(result\)/);
+  assert.match(summarySource, /buySignalIndicatorHtml\(result\.indicators\.daily,'日足'\)/);
+  assert.match(summarySource, /buySignalIndicatorHtml\(result\.indicators\.weekly,'週足'\)/);
+  assert.match(summarySource, /追加のテクニカル分析/);
   assert.match(cardSource, /8信号チェックリスト/);
   assert.match(cardSource, /レバレッジ制限/);
   assert.match(cardSource, /高値追い制限/);
@@ -1385,7 +1388,13 @@ test('buy signal SHADOW is disabled and handler-defended for every hard restrict
     renderAll: () => {},
     botSync: () => {}
   };
-  vm.runInNewContext(`${gateAndCardSource};${handlerSource}`, context);
+  // Evaluate the actual inline consensus definitions used by the summary.
+  // Keep this safety test independent of display stubs and synthetic ratings.
+  const summaryStart = html.indexOf('const TECHNICAL_FRAMES =');
+  const summaryEnd = html.indexOf('function normalizeBuySignalIndicator(', summaryStart);
+  assert.ok(summaryStart >= 0 && summaryEnd > summaryStart);
+  const consensusSource = html.slice(summaryStart, summaryEnd);
+  vm.runInNewContext(`${consensusSource};${gateAndCardSource};${handlerSource}`, context);
 
   const blockedCases = [
     ['leveraged product', { leveragedProduct: true }],

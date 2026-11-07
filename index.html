@@ -679,6 +679,47 @@ button:disabled{opacity:.45;pointer-events:none}
   #tab-ops #gate,#tab-pos .sumstrip,#tab-pos #risk-engine,#tab-pos #portfolio-xray,#tab-mkt #market-risk-regime,#tab-mkt #theme-intelligence-os,#tab-mkt #theme-tracker,#tab-buy .buy-summary,#tab-buy .buy-list{grid-column:1/-1}
   #modal{border-radius:16px;margin-bottom:24px}
 }
+
+/* Reference-style technical overview: colors describe indicators, not orders. */
+.technical-overview{container-type:inline-size;container-name:technical-summary;background:#fff;color:#18212c;border:1px solid #e2e7eb;border-radius:16px;padding:24px;margin:18px 0;min-width:0}
+.technical-overview h2{font-size:22px;line-height:1.4;margin:0 0 5px;font-weight:750;letter-spacing:.02em;color:#18212c}
+.technical-overview .technical-caption{font-size:12px;color:#66717e;margin:0 0 22px;line-height:1.7}
+.technical-frame-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:22px 12px}
+.technical-frame{min-width:0;text-align:center}
+.technical-frame-label{display:block;color:#6a717b;font-size:14px;margin-bottom:9px}
+.technical-verdict{display:flex;align-items:center;justify-content:center;gap:8px;min-height:64px;padding:10px 4px;border-radius:7px;font-size:18px;font-weight:700;white-space:nowrap}
+.technical-verdict.buy{background:#f8d1da;color:#b82e4c}
+.technical-verdict.sell{background:#cee7d8;color:#26733e}
+.technical-verdict.neutral{background:#e9edf2;color:#566171}
+.technical-verdict.unavailable{background:#f5f6f8;color:#737b86;border:1px solid #e1e5ea;font-size:15px;font-weight:600}
+.technical-overview .technical-note{font-size:12px;line-height:1.7;color:#66717e;margin:18px 0 12px}
+.technical-more{border-top:1px solid #e7ebef;padding-top:14px}
+.technical-more>summary{cursor:pointer;list-style:none;text-align:center;font-size:15px;font-weight:700;color:#18212c;padding:7px;min-height:40px}
+.technical-more>summary::-webkit-details-marker{display:none}
+.technical-more>summary::after{content:' ›';font-size:23px;vertical-align:-1px}
+.technical-more[open]>summary::after{content:' ⌄'}
+.technical-more>summary:focus-visible{outline:3px solid #3d78bd;outline-offset:3px;border-radius:4px}
+.technical-method,.technical-evidence{font-size:12px;line-height:1.9;color:#566171;overflow-wrap:anywhere}
+.technical-evidence{padding-left:20px}
+.technical-overview .buy-timeframe{background:#f5f7fa;border-color:#dde3e9;color:#18212c}
+.technical-overview .buy-timeframe h4,.technical-overview .buy-indicator small{color:#566171}
+@media(max-width:600px){.technical-overview{padding:18px 12px;border-radius:12px}.technical-overview h2{font-size:20px}.technical-frame-grid{gap:18px 7px}.technical-frame-label{font-size:12px}.technical-verdict{font-size:13px;min-height:54px;gap:2px}.technical-verdict.unavailable{font-size:12px}.technical-overview .technical-caption{margin-bottom:18px}}
+@media(max-width:350px){.technical-frame-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+/* Cards may be narrow even on a desktop viewport. Size to the card itself. */
+.technical-verdict>span:first-child{min-width:0;white-space:normal;overflow-wrap:anywhere}
+.technical-verdict>span[aria-hidden]{flex-shrink:0}
+@container technical-summary (max-width:420px){
+  .technical-frame-grid{gap:18px 6px}
+  .technical-frame-label{font-size:12px}
+  .technical-verdict{font-size:clamp(11px,4cqi,13px);min-height:54px;gap:2px;padding:10px 3px}
+  .technical-verdict.unavailable{font-size:12px}
+}
+@container technical-summary (max-width:280px){
+  .technical-frame-grid{column-gap:4px}
+  .technical-verdict{padding-inline:2px}
+  .technical-verdict>span[aria-hidden]{display:none}
+}
+
 </style>
 </head>
 <body>
@@ -2304,11 +2345,67 @@ function buySignalScoreExplanation(raw){
   const caps=(Array.isArray(raw.caps)?raw.caps:[]).slice(0,10).map(c=>`${safeText(c?.key,80)||'上限制約'}: 最大${number(c?.maximum)}点`);
   return[groups.length?groups.join('\n'):'項目別内訳未取得',`加点合計 ${number(raw.rawScore)}点`,Array.isArray(raw.deductions)?'減点: '+(deductions.join(' / ')||'なし'):'減点: 未取得',`減点後・上限適用前 ${number(raw.scoreBeforeCaps)}点`,Array.isArray(raw.caps)?'上限制約: '+(caps.join(' / ')||'なし'):'上限制約: 未取得',`最終得点 ${number(raw.finalScore)}点`,'未評価は条件不成立・0点と同義ではありません。欠損値は補完していません。'].join('\n');
 }
+// Display-only consensus. Never used by Commander, risk checks, or execution.
+// Keep the inline legacy copy in index.html equivalent (covered by parity tests).
+const TECHNICAL_FRAMES = [
+  ["5m", "5分"], ["15m", "15分"], ["30m", "30分"], ["1h", "1時間"],
+  ["5h", "5時間足"], ["daily", "日間"], ["weekly", "週単位"], ["monthly", "月単位"],
+];
+// Accept calendar dates or timezone-qualified ISO timestamps, never permissive
+// Date.parse formats or overflow dates (for example February 30).
+function technicalTimestamp(value) {
+  if (typeof value !== "string") return NaN;
+  const match = /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?(Z|[+-]\d{2}:\d{2}))?$/.exec(value);
+  if (!match) return NaN;
+  const [, year, month, day, hour, minute, second, , zone] = match;
+  const calendar = new Date(`${year}-${month}-${day}T00:00:00Z`);
+  if (!Number.isFinite(calendar.getTime()) || calendar.toISOString().slice(0, 10) !== `${year}-${month}-${day}`) return NaN;
+  if (hour !== undefined && (+hour > 23 || +minute > 59 || +second > 59)) return NaN;
+  if (zone && zone !== "Z" && (+zone.slice(1, 3) > 23 || +zone.slice(4, 6) > 59)) return NaN;
+  return Date.parse(value);
+}
+function technicalConsensus(period, frame, context = {}, now = Date.now()) {
+  const missing = (reason) => ({ label: "未取得", tone: "unavailable", arrow: "—", reason });
+  if (!["daily", "weekly"].includes(frame)) return missing("この時間足のデータは未接続です。日足からの代用はしません。");
+  const p = period || {};
+  const blocked = ["stale", "error", "unavailable"];
+  if (context.stale === true || blocked.includes(context.status) || blocked.includes(context.technicalStatus) || blocked.includes(context.indicatorsStatus) || p.stale === true ||
+      p.available === false || !["ok", "ready"].includes(p.status))
+    return missing("指標が未取得・不足、または古いため判定できません。");
+  const timestamp = technicalTimestamp(p.asOf);
+  const age = now - timestamp;
+  if (!Number.isFinite(timestamp) || !Number.isFinite(now) || age < -300000 || age > (frame === "daily" ? 4 : 14) * 86400000)
+    return missing("更新日時を確認できない、またはデータが古いため判定できません。");
+  const values = [p.rsi14, p.macd?.histogram, p.price, p.ema20, p.ema50];
+  if (!values.every(v => typeof v === "number" && Number.isFinite(v)) ||
+      p.rsi14 < 0 || p.rsi14 > 100 || [p.price, p.ema20, p.ema50].some(v => v <= 0))
+    return missing("RSI・MACD・EMAの3系統が揃うまで判定しません。");
+  // RSI extremes stay neutral to avoid presenting overbought/oversold as an entry.
+  const votes = [
+    p.rsi14 >= 55 && p.rsi14 <= 70 ? 1 : p.rsi14 >= 30 && p.rsi14 <= 45 ? -1 : 0,
+    Math.sign(p.macd.histogram),
+    p.price > p.ema20 && p.ema20 > p.ema50 ? 1 : p.price < p.ema20 && p.ema20 < p.ema50 ? -1 : 0,
+  ];
+  const score = votes.reduce((a, b) => a + b, 0);
+  return { label: score === 3 ? "強い買い" : score >= 2 ? "買い" : score === -3 ? "強い売り" : score <= -2 ? "売り" : "中立",
+    tone: score >= 2 ? "buy" : score <= -2 ? "sell" : "neutral",
+    arrow: score >= 2 ? "↗" : score <= -2 ? "↘" : "→",
+    reason: `指標基準日 ${p.asOf} · RSI / MACD / EMAの方向一致（表示専用）` };
+}
+const TECHNICAL_METHOD = "RSIは55〜70を買い方向、30〜45を売り方向、それ以外は中立。MACDはヒストグラムの正負、EMAは価格・20・50の順序で評価します。3系統すべてが必要で、全一致は強い買い／売り、2系統一致かつ反対なしは買い／売り、それ以外は中立です。鮮度の保守的な上限として、日足4暦日・週足14暦日を超えるデータは未取得。表示専用の指標集約で、売買推奨・発注判断ではありません。";
+
 function normalizeBuySignalIndicator(raw){
   const source=raw&&typeof raw==='object'&&!Array.isArray(raw)?raw:{},rsiRaw=source.rsi14??source.rsi,macdRaw=source.macd??source.macdSignal??source.macdState,emaRaw=source.ema??source.emaAlignment??source.emaState??([source.price,source.ema20,source.ema50,source.ema200].some(v=>v!=null&&v!==''&&typeof v!=='boolean'&&Number.isFinite(Number(v)))?`P ${buySignalValueText(source.price,40)} / 20 ${buySignalValueText(source.ema20,40)} / 50 ${buySignalValueText(source.ema50,40)} / 200 ${buySignalValueText(source.ema200,40)}`:null),rvolRaw=source.rvol??source.rvol20??source.relativeVolume;
   const number=value=>{const candidate=value&&typeof value==='object'?value.value??value.current:value;if(candidate==null||typeof candidate==='boolean'||(typeof candidate!=='number'&&typeof candidate!=='string')||String(candidate).trim()==='')return null;const n=Number(candidate);return Number.isFinite(n)?n:null};
   const rawStatus=String(source.status||'').toLowerCase(),status=source.available===true?'ready':['ok','ready'].includes(rawStatus)?'ready':['partial','stale','unavailable'].includes(rawStatus)?rawStatus:'unavailable';
   return{status,available:source.available===true||status==='ready',asOf:safeText(source.asOf,10),rsi:number(rsiRaw),macd:buySignalValueText(macdRaw),ema:buySignalValueText(emaRaw),rvol:number(rvolRaw)};
+}
+// Retain only the raw fields needed by the display-only consensus. Re-evaluate
+// freshness on every render, including restored/cached response renders.
+function buyTechnicalPeriod(raw){
+  const p=raw&&typeof raw==='object'?raw:{};
+  return {status:p.status,available:p.available,stale:p.stale,asOf:p.asOf,
+    rsi14:p.rsi14,macd:{histogram:p.macd?.histogram},price:p.price,ema20:p.ema20,ema50:p.ema50};
 }
 function normalizeBuySignalResult(raw){
   const source=raw&&typeof raw==='object'&&!Array.isArray(raw)?raw:{},symbol=normalizeTicker(source.symbol||source.ticker);if(!TICKER_RE.test(symbol))return null;
@@ -2319,7 +2416,7 @@ function normalizeBuySignalResult(raw){
   const riskRaw=source.riskReward&&typeof source.riskReward==='object'?source.riskReward:{ratio:source.riskReward},planRaw=source.positionPlan&&typeof source.positionPlan==='object'?source.positionPlan:{},fundamental=buySignalSafeRecord(source.fundamental),quality=buySignalSafeRecord(source.quality),chaseRaw=source.highPriceChase&&typeof source.highPriceChase==='object'?source.highPriceChase:source.chase&&typeof source.chase==='object'?source.chase:{},themeRaw=source.theme;
   const num=(...values)=>{for(const value of values){const n=Number(value);if(value!==''&&value!=null&&Number.isFinite(n))return n}return null},warnings=(Array.isArray(source.warnings)?source.warnings:[]).slice(0,20).map(v=>safeText(typeof v==='string'?v:v?.message||v?.reason||buySignalValueText(v),500)).filter(Boolean),provenance=(Array.isArray(source.provenance)?source.provenance:source.provenance&&typeof source.provenance==='object'?Object.entries(source.provenance).map(([k,v])=>`${k}: ${buySignalValueText(v)}`):[]).slice(0,20).map(v=>safeText(typeof v==='string'?v:buySignalValueText(v),300)).filter(Boolean);
   const activeCount=num(typeof source.active==='number'?source.active:null,signalBox.active,source.activeSignals)??signals.filter(signal=>signal.passed===true).length,availableCount=num(typeof source.available==='number'?source.available:null,signalBox.available,source.availableSignals)??signals.filter(signal=>signal.available).length,stale=source.stale===true||status==='stale'||source.availability?.stale===true||source.quality?.stale===true,available=source.available===true||source.availability?.available===true||availableCount===8,active=source.active===true||source.signalActive===true,leveragedProduct=source.leveragedProduct===true||source.leveraged===true,leverageBlocked=leveragedProduct||source.leverageBlocked===true||source.restrictions?.leverageBlocked===true,chaseBlocked=source.highChaseBlocked===true||source.chaseBlocked===true||chaseRaw.blocked===true,earningsBlocked=source.earningsBlocked===true||source.restrictions?.earningsBlocked===true,daily=normalizeBuySignalIndicator(source.indicators?.daily??source.technical?.daily??source.daily),weekly=normalizeBuySignalIndicator(source.indicators?.weekly??source.technical?.weekly??source.weekly),rrEligible=riskRaw.eligible===true||riskRaw.passed===true?true:riskRaw.eligible===false||riskRaw.passed===false?false:null,priceMode=safeText(source.quality?.priceMode,32),qualityAdjusted=source.quality?.adjusted===true||priceMode==='adjusted',qualitySufficient=source.quality?.sufficient===true,asOf=safeText(source.asOf||daily.asOf,64);
-  return{symbol,status,stale,available,active,activeCount,availableCount,signalContractValid,usable:false,asOf,price:num(source.price,source.currentPrice),score:num(source.score),scoreExplanation:buySignalScoreExplanation(source.scoreBreakdown),decision:safeText(source.decision??source.recommendation??'UNAVAILABLE',80),signals,indicators:{daily,weekly},theme:typeof themeRaw==='string'?safeText(themeRaw,120):safeText(themeRaw?.name||themeRaw?.label||themeRaw?.id,120),earningsDays:num(source.earningsDays,source.daysToEarnings,source.fundamental?.earningsDays,source.fundamental?.daysToEarnings),earningsBlocked,leveragedProduct,leverageBlocked,chaseBlocked,chaseText:safeText(source.highChaseReason||source.chaseReason||chaseRaw.reason||chaseRaw.status,240),riskReward:{ratio:num(riskRaw.ratio,riskRaw.value,riskRaw.rr),minimum:num(riskRaw.minimum,riskRaw.min),eligible:rrEligible,blocked:riskRaw.blocked===true||rrEligible===false,reason:safeText(riskRaw.reason||riskRaw.status,240)},positionPlan:{amountJpy:num(planRaw.amountJpy,planRaw.amount,source.amount),shares:num(planRaw.shares,source.shares),entry:num(planRaw.entry,planRaw.entryLow,source.entry),entryLow:num(planRaw.entryLow,planRaw.entry),entryHigh:num(planRaw.entryHigh,planRaw.entry),ema20RecoveryPrice:num(planRaw.ema20RecoveryPrice),breakoutPrice:num(planRaw.breakoutPrice),chaseLimitPrice:num(planRaw.chaseLimitPrice),stop:num(planRaw.stopPx,planRaw.stop,source.stop),take:num(planRaw.take1Px,planRaw.take1,planRaw.take,source.take),take1:num(planRaw.take1Px,planRaw.take1,planRaw.take,source.take),take2:num(planRaw.take2Px,planRaw.take2)},qualityAdjusted,qualitySufficient,priceMode,fundamental,quality,warnings,provenance,tradeEligible:false,execution:{mode:'SIMULATE',autoOrder:false,tradingConnected:false}};
+  return{technicalPeriods:{daily:buyTechnicalPeriod(source.indicators?.daily??source.technical?.daily??source.daily),weekly:buyTechnicalPeriod(source.indicators?.weekly??source.technical?.weekly??source.weekly)},technicalStatus:source.technical?.status,indicatorsStatus:source.indicators?.status,symbol,status,stale,available,active,activeCount,availableCount,signalContractValid,usable:false,asOf,price:num(source.price,source.currentPrice),score:num(source.score),scoreExplanation:buySignalScoreExplanation(source.scoreBreakdown),decision:safeText(source.decision??source.recommendation??'UNAVAILABLE',80),signals,indicators:{daily,weekly},theme:typeof themeRaw==='string'?safeText(themeRaw,120):safeText(themeRaw?.name||themeRaw?.label||themeRaw?.id,120),earningsDays:num(source.earningsDays,source.daysToEarnings,source.fundamental?.earningsDays,source.fundamental?.daysToEarnings),earningsBlocked,leveragedProduct,leverageBlocked,chaseBlocked,chaseText:safeText(source.highChaseReason||source.chaseReason||chaseRaw.reason||chaseRaw.status,240),riskReward:{ratio:num(riskRaw.ratio,riskRaw.value,riskRaw.rr),minimum:num(riskRaw.minimum,riskRaw.min),eligible:rrEligible,blocked:riskRaw.blocked===true||rrEligible===false,reason:safeText(riskRaw.reason||riskRaw.status,240)},positionPlan:{amountJpy:num(planRaw.amountJpy,planRaw.amount,source.amount),shares:num(planRaw.shares,source.shares),entry:num(planRaw.entry,planRaw.entryLow,source.entry),entryLow:num(planRaw.entryLow,planRaw.entry),entryHigh:num(planRaw.entryHigh,planRaw.entry),ema20RecoveryPrice:num(planRaw.ema20RecoveryPrice),breakoutPrice:num(planRaw.breakoutPrice),chaseLimitPrice:num(planRaw.chaseLimitPrice),stop:num(planRaw.stopPx,planRaw.stop,source.stop),take:num(planRaw.take1Px,planRaw.take1,planRaw.take,source.take),take1:num(planRaw.take1Px,planRaw.take1,planRaw.take,source.take),take2:num(planRaw.take2Px,planRaw.take2)},qualityAdjusted,qualitySufficient,priceMode,fundamental,quality,warnings,provenance,tradeEligible:false,execution:{mode:'SIMULATE',autoOrder:false,tradingConnected:false}};
 }
 function normalizeBuySignalResponse(raw,allowedSymbols=[]){
   const source=raw&&typeof raw==='object'&&!Array.isArray(raw)?raw:null;if(!source)throw new Error('買いシグナルAPIの応答形式が不正です');
@@ -2341,6 +2438,10 @@ function buySignalEffectiveEligible(result,globalStop=false){
   const ratio=Number(result?.riskReward?.ratio),reportedMinimum=Number(result?.riskReward?.minimum),minimum=Math.max(1.8,Number.isFinite(reportedMinimum)?reportedMinimum:1.8),rrReady=Number.isFinite(ratio)&&ratio>=minimum&&result?.riskReward?.eligible!==false&&!result?.riskReward?.blocked;
   return result?.usable===true&&result?.active===true&&buySignalDecisionIsBuy(result)&&result?.leveragedProduct!==true&&result?.leverageBlocked!==true&&result?.chaseBlocked!==true&&!buySignalEarningsRestricted(result)&&rrReady&&globalStop!==true;
 }
+function technicalSummaryHtml(result){
+  const frames=TECHNICAL_FRAMES.map(([key,label])=>({key,label,verdict:technicalConsensus(result.technicalPeriods?.[key],key,{status:result.status,stale:result.stale,technicalStatus:result.technicalStatus,indicatorsStatus:result.indicatorsStatus})}));
+  return `<section class="technical-overview" aria-label="時間足別テクニカル分析"><h2>テクニカル</h2><p class="technical-caption">時間足ごとの方向感を、ひと目で。</p><div class="technical-frame-grid">${frames.map(({label,verdict:v})=>`<div class="technical-frame"><span class="technical-frame-label">${esc(label)}</span><div class="technical-verdict ${esc(v.tone)}" title="${esc(v.reason)}"><span>${esc(v.label)}</span><span aria-hidden="true">${esc(v.arrow)}</span></div></div>`).join('')}</div><p class="technical-note">日足・週足のみ対応。短期足・月足は未接続です。未取得は中立ではありません。</p><details class="technical-more"><summary>追加のテクニカル分析</summary><p class="technical-method">${esc(TECHNICAL_METHOD)}</p><ul class="technical-evidence">${frames.map(({label,verdict:v})=>`<li>${esc(label)}：${esc(v.label)} · ${esc(v.reason)}</li>`).join('')}</ul><div class="buy-timeframes">${buySignalIndicatorHtml(result.indicators.daily,'日足')}${buySignalIndicatorHtml(result.indicators.weekly,'週足')}</div></details></section>`;
+}
 function buySignalIndicatorHtml(period,label){
   const status=BUY_SIGNAL_STATUS.includes(period?.status)?period.status:'unavailable',rsi=period?.rsi==null?'N/A':Number(period.rsi).toFixed(1),rvol=period?.rvol==null?'N/A':Number(period.rvol).toFixed(2)+'x';
   return`<section class="buy-timeframe" aria-label="${esc(label)}テクニカル"><h4>${esc(label)}・${esc(status.toUpperCase())}</h4><div class="buy-indicators"><div class="buy-indicator"><small>RSI</small><b>${esc(rsi)}</b></div><div class="buy-indicator"><small>MACD</small><b>${esc(period?.macd||'N/A')}</b></div><div class="buy-indicator"><small>EMA</small><b>${esc(period?.ema||'N/A')}</b></div><div class="buy-indicator"><small>RVOL</small><b>${esc(rvol)}</b></div></div></section>`;
@@ -2352,7 +2453,7 @@ function buySignalCard(result,index,globalStop){
   if(held)flags.push('<span class="buy-flag warn">保有中・新規買い扱いなし</span>');if(result.leveragedProduct)flags.push('<span class="buy-flag warn">レバレッジ商品</span>');if(result.leverageBlocked)flags.push('<span class="buy-flag stop">レバレッジ制限</span>');if(result.chaseBlocked)flags.push('<span class="buy-flag stop">高値追い制限</span>');if(earningsRestricted)flags.push('<span class="buy-flag stop">決算接近制限</span>');if(globalStop)flags.push('<span class="buy-flag stop">ACCOUNT GLOBAL STOP</span>');
   const warnings=[...(result.leveragedProduct||result.leverageBlocked?['レバレッジ商品はシグナルが強くても新規候補から除外されています']:[]),...(result.chaseBlocked?[result.chaseText||'高値追い条件によりエントリー不可']:[]),...(rrBlocked?[result.riskReward.reason||'リスクリワード条件を満たしていません']:[]),...(earningsRestricted?[`決算まで${result.earningsDays==null?'N/A':result.earningsDays+'日'}のため新規エントリー制限`]:[]),...(globalStop?['口座の重大リスクが解消するまで候補はWAITです']:[]),...result.warnings];
   return`<article class="buy-card ${kind}" aria-labelledby="buy-title-${index}"><div class="buy-card-head"><div class="buy-identity"><div class="buy-ticker"><b id="buy-title-${index}">${esc(result.symbol)}</b><span class="buy-price">${esc(buySignalPrice(result.price))}</span></div><div class="buy-context"><span>THEME ${esc(result.theme||'N/A')}</span><span>決算 ${esc(result.earningsDays==null?'N/A':result.earningsDays+'日後')}</span><span title="日足45・週足20・テーマ15・材料20から減点・上限制約を適用。Astra Scoreとは別指標で、上昇確率ではありません">TECHNICAL SCORE ${esc(result.score==null?'N/A':result.score.toFixed(1))}</span></div></div><div class="buy-verdict ${kind}"><b>${esc(decision)}</b><small>SIMULATE判定</small></div></div>
-  <div class="buy-flags">${flags.join('')}</div><div class="buy-timeframes">${buySignalIndicatorHtml(result.indicators.daily,'日足')}${buySignalIndicatorHtml(result.indicators.weekly,'週足')}</div>
+  <div class="buy-flags">${flags.join('')}</div>${technicalSummaryHtml(result)}
   <div class="buy-plan" aria-label="${esc(result.symbol)} シミュレーション計画"><div><small>AMOUNT</small><b>${esc(plan.amountJpy==null?'N/A':'¥'+Math.round(plan.amountJpy).toLocaleString('ja-JP'))}</b></div><div><small>SHARES</small><b>${esc(plan.shares==null?'N/A':String(plan.shares))}</b></div><div><small>ENTRY ZONE</small><b>${esc(plan.entryLow==null?buySignalPrice(plan.entry):`${buySignalPrice(plan.entryLow)}–${buySignalPrice(plan.entryHigh)}`)}</b></div><div><small>STOP</small><b>${esc(buySignalPrice(plan.stop))}</b></div><div><small>TAKE 1</small><b>${esc(buySignalPrice(plan.take1))}</b></div><div><small>TAKE 2</small><b>${esc(buySignalPrice(plan.take2))}</b></div><div><small>CHASE LIMIT</small><b>${esc(buySignalPrice(plan.chaseLimitPrice))}</b></div></div>
   <ul class="buy-checklist" aria-label="8信号チェックリスト">${result.signals.map(signal=>`<li class="buy-check ${signal.passed===true?'pass':signal.passed===false?'fail':'na'}"><i aria-hidden="true">${signal.passed===true?'✓':signal.passed===false?'×':'—'}</i><span><b>${esc(signal.label)}・${signal.passed===true?'合格':signal.passed===false?'不合格':'判定不能'}</b><small>${esc(signal.value)}${signal.detail?'｜'+esc(signal.detail):''}</small></span></li>`).join('')}</ul>
   ${warnings.length?`<div class="buy-warnings">${warnings.slice(0,20).map((warning,i)=>`<div class="buy-warning ${i<4&&hardBlocked?'stop':''}">${esc(warning)}</div>`).join('')}</div>`:''}
