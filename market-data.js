@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('crypto');
+const { buildPeerComparisons } = require('./peer-comparison');
 const {
   BACKTEST_METHOD_VERSION,
   SIMULATION_EXECUTION,
@@ -3829,6 +3830,7 @@ class MarketDataService {
           const parsed = parseYahooTechnicalHistory(payload, this.now());
           for (const [symbol, history] of parsed) {
             if (!requested.has(symbol)) continue;
+            history.retrievedAt = new Date(this.now()).toISOString();
             collected.set(symbol, history);
             this._setTechnicalHistoryCache(symbol, history);
           }
@@ -3862,6 +3864,7 @@ class MarketDataService {
             );
             const history = parseYahooTechnicalChartHistory(payload, symbol, this.now());
             if (history) {
+              history.retrievedAt = new Date(this.now()).toISOString();
               collected.set(symbol, history);
               this._setTechnicalHistoryCache(symbol, history);
               return;
@@ -4540,7 +4543,8 @@ class MarketDataService {
           marketCapitalization: pickMetric('marketCapitalization'),
           peTtm: pickMetric('peTTM'),
           psTtm: pickMetric('psTTM'),
-          revenueGrowthTtmYoy: pickMetric('revenueGrowthTTMYoy', 'revenueGrowthQuarterlyYoy'),
+          revenueGrowthTtmYoy: pickMetric('revenueGrowthTTMYoy'),
+          revenueGrowthQuarterlyYoy: pickMetric('revenueGrowthQuarterlyYoy'),
           grossMarginTtm: pickMetric('grossMarginTTM'),
           netProfitMarginTtm: pickMetric('netProfitMarginTTM'),
           high52Week: pickMetric('52WeekHigh'),
@@ -4813,6 +4817,13 @@ class MarketDataService {
         nowMs: this.now()
       });
     });
+    // Reuse this request's histories; never expand external data collection for peers.
+    const peerGroups = INTELLIGENCE_THEME_CATALOG.map(group => ({
+      id: group.id, label: group.name, symbols: group.relatedTickers.filter(symbol => symbol !== 'JMIA')
+    }));
+    peerGroups.push({id:'compute-mining-reference',label:'計算設備・マイニング関連（固定比較枠）',symbols:['IREN','CORZ','WULF','CIFR','HUT']});
+    const peerComparisons = buildPeerComparisons({results, histories, groups:peerGroups, nowMs:this.now()});
+    results.forEach(result => { result.peerComparison = peerComparisons.get(result.symbol); });
     const available = results.filter(result => result.status !== 'unavailable').length;
     const stale = results.filter(result => result.status === 'stale').length;
     const partial = results.filter(result => result.status === 'partial').length;

@@ -185,3 +185,34 @@ test('one holding keeps the overview to refresh and data status without redundan
   c.S.positions.push({...c.S.positions[0],id:'duplicate'});assert.doesNotMatch(c.holdingsTechnicalOverview(true),/holdings-counts/);
   c.S.positions.push({id:'other',ticker:'OTHER',shares:1});assert.match(c.holdingsTechnicalOverview(true),/holdings-counts/);
 });
+
+test('price map shows measured prior-window anchors, not orders or fabricated targets',()=>{
+ const c=context(),r=result({technicalPeriods:{daily:period({priorHigh20:120,priorLow20:90}),weekly:period()}}),out=c.holdingsPriceMapHtml(r,'fixture');
+ for(const text of ['直前20本の値幅の内側','$120.00','$90.00','9.09%','-18.18%','当日の足を除く','注文価格・利確や損切りの指定ではなく','手数料'])assert.ok(out.includes(text),text);
+ assert.equal(c.holdingsPriceMapHtml({...r,stale:true},'fixture'),'');
+ assert.equal(c.holdingsPriceMapHtml(result(),'fixture'),'');
+ assert.equal(c.holdingsPriceMapHtml(result({technicalPeriods:{daily:period({priorHigh20:90,priorLow20:120}),weekly:period()}}),'fixture'),'');
+ assert.match(c.holdingsPriceMapHtml(result({technicalPeriods:{daily:period({price:125,priorHigh20:120,priorLow20:90}),weekly:period()}}),'fixture'),/次の上値目標は.*決められません/);
+});
+test('long-term evidence keeps quarterly and TTM separate and refuses synthetic freshness',()=>{
+ const c=context(),raw={status:'partial',provenance:{source:'finnhub',retrievedAt:'2026-11-07T10:00:00Z'},metrics:{revenueGrowthTtmYoy:12,revenueGrowthQuarterlyYoy:25,peTtm:-5,psTtm:'100'}};
+ const e=c.holdingsFundamentalEvidence(raw),out=c.holdingsLongTermHtml(result({fundamentalEvidence:e}),'fixture');
+ for(const text of ['長期の上値はまだ判断できません','この銘柄で成立したという評価ではありません','直近12か月売上の前年同期比','直近四半期売上の前年同期比','12.00%','25.00%','一次資料との照合前','会計基準は未確認','増資による希薄化'])assert.ok(out.includes(text),text);
+ assert.doesNotMatch(out,/100.00倍/);
+ for(const patch of [{stale:true},{provenance:{source:'other',retrievedAt:'2026-11-07T10:00:00Z'}},{provenance:{source:'finnhub',retrievedAt:'2026-11-01T10:00:00Z'}}])assert.equal(c.holdingsFundamentalEvidence({...raw,...patch}).status,'unavailable');
+ assert.doesNotMatch(c.holdingsLongTermHtml(result({stale:true,fundamentalEvidence:e}),'fixture'),/12.00%/);
+});
+function peerFixture(){
+ const row={return20Pct:5,rsi14:60,macdHistogramPct:.2,macdState:'positive',source:'synthetic-peer-fixture',retrievedAt:null};
+ return{methodVersion:'explicit-group-aligned-daily-peers-v1',symbol:'DEMO',status:'ok',asOf:'2026-11-06',analysisOnly:true,tradeEligible:false,period:{start:'2026-10-09',end:'2026-11-06',closes:21,returns:20,interval:'1d',priceMode:'adjusted',currency:'USD'},self:{...row,return20Pct:8},peers:[{...row,symbol:'PEER1',correlation20:.8},{...row,symbol:'PEER2',correlation20:null}],peerMedianReturn20Pct:5,relativeReturn20Pp:3,groups:[{id:'example',label:'Example'}],excluded:[]};
+}
+test('peer display uses aligned measured differences and never treats correlation as a forecast',()=>{
+ const c=context(),out=c.holdingsPeerHtml(result({peerComparison:peerFixture()}),'fixture');
+ for(const text of ['3.00ポイント強い','PEER1','PEER2','連動性 0.80','連動性 未算出','同じ21終値','将来の優劣や売買推奨ではありません','企業価値の直接比較ではありません','最大20銘柄内','取得時刻：未確認'])assert.ok(out.includes(text),text);
+ assert.doesNotMatch(out,/勝率|目標株価|全米株を/);
+ for(const patch of [{asOf:'2026-11-05'},{methodVersion:'unknown'},{tradeEligible:true},{self:{...peerFixture().self,rsi14:NaN}},{self:{...peerFixture().self,macdState:'negative'}}])assert.doesNotMatch(c.holdingsPeerHtml(result({peerComparison:{...peerFixture(),...patch}}),'fixture'),/3.00ポイント|連動性 0.80/);
+ assert.doesNotMatch(c.holdingsPeerHtml(result({stale:true,peerComparison:peerFixture()}),'fixture'),/3.00ポイント/);
+ assert.doesNotMatch(c.holdingsPeerHtml(result({peerComparison:{...peerFixture(),peerMedianReturn20Pct:999}}),'fixture'),/3.00ポイント/);
+ const h=peerFixture();h.groups[0].label='<img src=x onerror=alert(1)>';h.peers[0].source='<script>';
+ assert.doesNotMatch(c.holdingsPeerHtml(result({peerComparison:h}),'fixture'),/<img|<script>/);
+});

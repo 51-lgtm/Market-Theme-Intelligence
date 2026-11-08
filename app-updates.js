@@ -53,7 +53,7 @@
     box.setAttribute('aria-label', '画面の更新状況');
     box.style.cssText = 'grid-column:1/-1;display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:12px;line-height:1.5;color:#aebed1;margin:0 0 10px;overflow-wrap:anywhere';
     const label = doc.createElement('span');
-    label.textContent = '画面版 11/7・結論表示';
+    label.textContent = '画面版 11/8・比較表示';
     label.title = current;
     const status = doc.createElement('span');
     status.setAttribute('role', 'status');

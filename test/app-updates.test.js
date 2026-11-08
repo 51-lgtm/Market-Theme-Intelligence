@@ -8,7 +8,7 @@ const { validRelease, releaseState, readRelease, activateAndReload } = require('
 const { createApp } = require('../server');
 
 test('release comparison never labels invalid or unknown metadata as current', () => {
-  assert.equal(releaseState('2026-11-07-clarity-1', '2026-11-07-clarity-1'), 'current');
+  assert.equal(releaseState('2026-11-08-comparison-1', '2026-11-08-comparison-1'), 'current');
   assert.equal(releaseState('old', 'new'), 'available');
   for (const value of [null, '', {}, '<script>', 'a'.repeat(65)]) {
     assert.equal(validRelease(value), false);
@@ -62,7 +62,7 @@ test('worker activation removes only old application caches and never forces act
   const source = fs.readFileSync(path.join(__dirname, '../sw.js'), 'utf8');
   vm.runInNewContext(source, {
     self: { addEventListener(type, fn) { handlers[type] = fn; }, clients: { claim: () => claimed++ } },
-    caches: { keys: async () => ['uscmd-old', 'astra-private', 'uscmd-v14-holdings-clarity-20261107'], delete: async key => removed.push(key) },
+    caches: { keys: async () => ['uscmd-old', 'astra-private', 'uscmd-v14-holdings-comparison-20261108'], delete: async key => removed.push(key) },
     Set
   });
   handlers.activate({ waitUntil(promise) { awaited = promise; } }); await awaited;
@@ -78,7 +78,7 @@ test('public release metadata is uncached and never calls a market provider', as
     const response = await fetch(base + '/app-release.json');
     assert.equal(response.status, 200); assert.match(response.headers.get('cache-control'), /no-store/);
     const body = await response.json();
-    assert.equal(body.release, '2026-11-07-clarity-1');
+    assert.equal(body.release, '2026-11-08-comparison-1');
     assert.deepEqual(Object.keys(body).sort(), ['release', 'requestId']); assert.equal(calls, 0);
     const script = await fetch(base + '/app-updates.js');
     assert.equal(script.status, 200); assert.match(script.headers.get('content-type'), /javascript/);
