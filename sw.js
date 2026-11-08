@@ -1,7 +1,7 @@
 /* US COMMAND ULTRA v14.0.0 — technical buy-signal watch system */
 'use strict';
 
-const CACHE = 'uscmd-v14-holdings-comparison-20261108';
+const CACHE = 'uscmd-v14-price-map-20261108-2';
 const SHELL = ['/', '/index.html', '/app-updates.js', '/manifest.json', '/icon-192.png', '/icon-512.png'];
 const CACHEABLE_PATHS = new Set(SHELL);
 

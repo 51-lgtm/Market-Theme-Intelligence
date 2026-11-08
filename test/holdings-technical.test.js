@@ -189,9 +189,12 @@ test('one holding keeps the overview to refresh and data status without redundan
 test('price map shows measured prior-window anchors, not orders or fabricated targets',()=>{
  const c=context(),r=result({technicalPeriods:{daily:period({priorHigh20:120,priorLow20:90}),weekly:period()}}),out=c.holdingsPriceMapHtml(r,'fixture');
  for(const text of ['直前20本の値幅の内側','$120.00','$90.00','9.09%','-18.18%','当日の足を除く','注文価格・利確や損切りの指定ではなく','手数料'])assert.ok(out.includes(text),text);
- assert.equal(c.holdingsPriceMapHtml({...r,stale:true},'fixture'),'');
- assert.equal(c.holdingsPriceMapHtml(result(),'fixture'),'');
- assert.equal(c.holdingsPriceMapHtml(result({technicalPeriods:{daily:period({priorHigh20:90,priorLow20:120}),weekly:period()}}),'fixture'),'');
+ assert.match(c.holdingsPriceMapHtml({...r,stale:true},'fixture'),/確認待ち/);
+ assert.doesNotMatch(c.holdingsPriceMapHtml({...r,stale:true},'fixture'),/<svg|\$120/);
+ assert.match(c.holdingsPriceMapHtml(result(),'fixture'),/確認待ち/);
+ assert.match(c.holdingsPriceMapHtml(result({technicalPeriods:{daily:period({priorHigh20:90,priorLow20:120}),weekly:period()}}),'fixture'),/確認待ち/);
+ const card=c.holdingsTechnicalCard(r,'fixture');assert.ok(card.indexOf('短期：今どの位置？')<card.indexOf('短期（数日〜数週間）'));
+ assert.match(out,/<svg[^>]+role="img"/);assert.match(out,/上側の確認/);assert.match(out,/下側の確認/);
  assert.match(c.holdingsPriceMapHtml(result({technicalPeriods:{daily:period({price:125,priorHigh20:120,priorLow20:90}),weekly:period()}}),'fixture'),/次の上値目標は.*決められません/);
 });
 test('long-term evidence keeps quarterly and TTM separate and refuses synthetic freshness',()=>{
