@@ -7,6 +7,7 @@ const path = require('path');
 const { MarketDataService, THEME_CATALOG, normalizeSymbol } = require('./market-data');
 const pkg = require('./package.json');
 const { OfficialRiskNews } = require('./official-risk-news');
+const { OfficialTreasuryRates } = require('./official-treasury-rates');
 const { astraEvidence } = require('./astra-bridge');
 
 const APP_VERSION = pkg.version;
@@ -495,6 +496,7 @@ function createApp(options = {}) {
   });
   const fetchImpl = options.fetch || global.fetch;
   const officialRiskNews = options.officialRiskNews || new OfficialRiskNews({ fetchImpl });
+  const treasuryRates = options.treasuryRates || new OfficialTreasuryRates({ fetchImpl });
   const allowedOrigins = parseAllowedOrigins(env.ALLOWED_ORIGINS);
 
   app.disable('x-powered-by');
@@ -783,6 +785,16 @@ function createApp(options = {}) {
     } finally {
       req.removeListener('aborted', abort);
       res.removeListener('close', close);
+    }
+  });
+
+  app.get('/api/treasury-yield', marketRegimeRateLimiter, async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    try {
+      const payload = await treasuryRates.get();
+      return res.status(payload.status === 'unavailable' ? 503 : 200).json(payload);
+    } catch (_) {
+      return res.status(503).json({status:'unavailable',latest:null,previous:null,changeBps:null,retrievedAt:null});
     }
   });
 

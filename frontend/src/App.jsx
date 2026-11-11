@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { api, setCsrf } from "./api.js";
+import TreasuryYieldPanel from "./TreasuryYieldPanel.jsx";
 import {
   array,
   number,
@@ -590,6 +591,7 @@ function Workspace() {
               {page === "dashboard" && (
                 <>
                   <MarketStrip market={data?.market} />
+                  <TreasuryYieldPanel />
                   <div className="dashboard-top">
                     <CommanderPanel
                       commander={data?.commander}
@@ -870,7 +872,7 @@ function MarketStrip({ market }) {
     ["VIX", ["VIX", "^VIX", "vix"]],
     ["WTI原油", ["WTI", "CL=F"]],
     ["BTC", ["BTC", "BTC-USD", "btc"]],
-    ["米10年債", ["Treasury Yield", "TNX", "^TNX", "treasury_yield"]],
+    ["米10年債 (^TNX参考)", ["Treasury Yield", "TNX", "^TNX", "treasury_yield"]],
     ["USD", ["USD", "DX-Y.NYB", "usd"]],
     ["USD/JPY", ["USD/JPY", "JPY=X"]],
     ["RISK SCORE", ["risk_score", "fear_risk_score"]],
@@ -887,7 +889,7 @@ function MarketStrip({ market }) {
             <small className={sign(q.change_pct ?? q.changePct ?? q.change)}>
               {number(q.change_pct ?? q.changePct ?? q.change) === null
                 ? (label === "RISK SCORE" && number(value) !== null ? "リスク指数 / 確率ではありません" : statusLabel(q.status || q.data_status || "unavailable"))
-                : pct(q.change_pct ?? q.changePct ?? q.change)}
+                : `${pct(q.change_pct ?? q.changePct ?? q.change)}${label.includes("^TNX") ? " (相対変化)" : ""}`}
             </small>
           </div>
         );

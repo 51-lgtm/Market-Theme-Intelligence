@@ -299,3 +299,9 @@ source delays and intraday developments remain limitations. Exact exchange-
 calendar verification and licensed live data are not implemented in this patch.
 
 Focused checks: `node --test test/risk-context.test.js test/official-risk-news.test.js test/official-risk-news-route.test.js`.
+
+### Official daily Treasury yield display
+
+The Treasury display is separate from the existing Yahoo `^TNX` quote. It uses the U.S. Treasury daily nominal par yield curve and labels the observation date, previous published observation, percentage yield, and basis-point difference (1 bp = 0.01 percentage point). It is not a real-time traded bond quote and is not an input to the stock-direction or risk model. Missing observations are not filled forward as fresh data; stale cached data and unverified publication/calendar status must remain visible. The official source and methodology link are displayed beside the data.
+
+Official Treasury XML documentation: https://home.treasury.gov/treasury-daily-interest-rate-xml-feed . Methodology: https://home.treasury.gov/policy-issues/financing-the-government/interest-rate-statistics/treasury-yield-curve-methodology . The official Data.gov dataset record lists public access and CC0 1.0: https://catalog.data.gov/dataset/interest-rate-statistics-daily-treasury-yield-curve-rates . Data describe indicative bid-based par yields, normally published by 6 p.m. Eastern on trading days, subject to delays. Do not infer an updated quote from a successful request or a non-business day from a missing row.

@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
-<meta name="app-release" content="2026-11-08-price-map-2">
+<meta name="app-release" content="2026-11-11-treasury-1">
 <script src="/app-updates.js" defer></script>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="description" content="日足・週足テクニカル、テーマ、ニュース、決算を統合し、SIMULATE専用の買い候補・監視・待機・回避を可視化する米国株司令室">
@@ -793,6 +793,11 @@ html{scroll-padding-top:calc(var(--hud-h) + env(safe-area-inset-top) + 38px)}
 @media(max-width:500px){.holdings-indicators{grid-template-columns:repeat(2,minmax(0,1fr))}.holdings-tech{padding:12px}.holdings-head{gap:8px}.holdings-head h2{font-size:1.12rem}.holdings-frame-head{display:block}.holdings-frame-head small{display:block;margin-top:2px}#tab-pos .pos-top{gap:6px}#tab-pos .pos-nm{flex-basis:calc(100% - 105px);order:5}#tab-pos .pos-price{margin-left:auto}}
 
 .holdings-price-map{margin:14px 0;padding:14px;border:1px solid var(--line,#344154);border-radius:12px;background:rgba(110,150,190,.05)}.holdings-price-map svg{display:block;width:100%;max-width:520px;margin:auto;height:auto}.holdings-price-labels{display:grid;grid-template-columns:1fr 1.35fr 1fr;gap:8px;text-align:center;margin-bottom:12px}.holdings-price-labels span{min-width:0;font-size:12px}.holdings-price-labels b{font-size:17px;overflow-wrap:anywhere}.holdings-price-labels small{display:block;font-size:10px;opacity:.8}.holdings-price-map>small{display:block;line-height:1.5}
+
+/* Official Treasury observations are an independent display-only panel. */
+.treasury-panel{border-color:rgba(137,173,243,.25);min-width:0}.treasury-head{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}.treasury-kicker{color:var(--cyan);font:600 .65rem var(--num);letter-spacing:.12em}.treasury-head h3{font-size:.95rem;margin:5px 0}.treasury-head h3 small{font-size:.7rem;color:var(--mut);font-weight:400}.treasury-refresh{min-height:44px;padding:8px 12px}.treasury-status{font-size:.72rem;color:var(--mut);margin:8px 0 14px}.treasury-panel.stale .treasury-status,.treasury-panel.unavailable .treasury-status,.treasury-panel.unverified .treasury-status{color:var(--amber)}.treasury-values{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:0 0 14px}.treasury-values dt{color:var(--mut);font-size:.62rem;margin-bottom:6px}.treasury-values dd{font-family:var(--num);font-size:1.08rem;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}.treasury-values dd.treasury-yield{font-size:1.75rem}.treasury-values small{display:block;color:var(--mut);font-size:.6rem;margin-top:5px;line-height:1.5}.treasury-meta{display:flex;flex-wrap:wrap;gap:5px 18px;color:var(--mut);font-size:.62rem;overflow-wrap:anywhere}.treasury-notes{padding-left:17px;margin:12px 0;color:var(--amber);font-size:.67rem;line-height:1.65}.treasury-method{color:var(--mut);font-size:.67rem;line-height:1.65;margin:10px 0}.treasury-source{color:var(--cyan);font-size:.67rem;text-decoration:underline;text-underline-offset:3px;overflow-wrap:anywhere}
+@media(max-width:680px){.treasury-values{grid-template-columns:repeat(2,minmax(0,1fr));gap:17px 12px}.treasury-head h3 small{display:block;margin-top:4px}}
+
 </style>
 </head>
 <body>
@@ -1806,6 +1811,129 @@ function rankDo(i){if(marketRegimeAnalysisIsOld(S.ai?.market))return toast('旧�
 function rankWatch(i){if(marketRegimeAnalysisIsOld(S.ai?.market))return toast('旧市場レジームのAI候補です。再分析後に操作してください');const r=S.ai?.market?.rank?.[i];if(!r||!TICKER_RE.test(normalizeTicker(r.t))){toast('ティッカー形式が不正です');return}r.t=normalizeTicker(r.t);if(!S.watch.includes(r.t)){S.watch.push(r.t);save();renderAll();toast('監視に追加: '+r.t);botSync(true)}}
 
 /* ============ TAB: 市場 ============ */
+
+/* ---- Official Treasury display: shared validation and request store ---- */
+// Display-only Treasury observations. Keep the legacy inline copy identical.
+// These values never feed risk scores, AI prompts, or execution.
+const TREASURY_SOURCE_URL = "https://home.treasury.gov/treasury-daily-interest-rate-xml-feed";
+const TREASURY_METHOD_NOTE = "米財務省のDaily Treasury Par Yield Curve Rates（10年・日次公表値）。^TNXの市場指標とは別系列で、リアルタイム金利ではありません。1bp = 0.01ポイント。危険スコア・AI・発注には接続しません。";
+
+function treasuryDate(value) {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+  const date = new Date(value + "T00:00:00Z");
+  return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value ? value : null;
+}
+function treasuryTime(value, now) {
+  if (typeof value !== "string") return null;
+  const match = /^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,3})?Z$/.exec(value);
+  if (!match || !treasuryDate(match[1]) || +match[2] > 23 || +match[3] > 59 || +match[4] > 59) return null;
+  const time = Date.parse(value);
+  return Number.isFinite(time) && time <= now + 300000 ? value : null;
+}
+function treasuryNumber(value) {
+  return typeof value === "number" && Number.isFinite(value) && value >= -20 && value <= 100 ? value : null;
+}
+function treasuryYieldView(raw, { now = Date.now(), requestFailed = false } = {}) {
+  const data = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+  const recognized = ["fresh", "stale", "unavailable"].includes(data.status);
+  const retrievedAt = treasuryTime(data.retrievedAt, now);
+  const checkedAt = treasuryTime(data.checkedAt, now);
+  const date = treasuryDate(data.latest?.date);
+  const asOf = date && date <= new Date(now).toISOString().slice(0, 10) ? date : null;
+  const yieldPct = recognized && asOf ? treasuryNumber(data.latest?.yieldPct) : null;
+  const priorDate = treasuryDate(data.previous?.date);
+  const previousDate = priorDate && asOf && priorDate < asOf ? priorDate : null;
+  const previousYieldPct = recognized && previousDate ? treasuryNumber(data.previous?.yieldPct) : null;
+  const expectedBps = yieldPct !== null && previousYieldPct !== null ? Math.round((yieldPct - previousYieldPct) * 10000) / 100 : null;
+  const changeBps = expectedBps !== null && typeof data.changeBps === "number" && Number.isFinite(data.changeBps) && Math.abs(data.changeBps - expectedBps) < 0.005 ? expectedBps : null;
+  const stale = data.stale === true || data.status === "stale" || (retrievedAt !== null && now - Date.parse(retrievedAt) >= 3600000) || (requestFailed && asOf !== null);
+  const missing = yieldPct === null;
+  const observationAgeDays = asOf ? Math.floor((Date.parse(new Date(now).toISOString().slice(0, 10) + "T00:00:00Z") - Date.parse(asOf + "T00:00:00Z")) / 86400000) : null;
+  const notes = [];
+  if (observationAgeDays !== null) notes.push(`観測日から${observationAgeDays}暦日経過（UTC日付基準）。${data.latestSessionVerified === true ? "" : "最新の公表値かは未確認です。"}`);
+  if (requestFailed) notes.push("再取得できませんでした。表示が残っている場合は前回の取得結果です。");
+  if (missing) notes.push(asOf ? "公表データ日の10年利回りは欠測です。前の日の値では補完しません。" : "公表データを取得できていません。N/Aは0%ではありません。");
+  if (stale) notes.push("STALE：古い取得結果です。最新値として扱わないでください。");
+  if (!retrievedAt && asOf) notes.push("取得日時を確認できません。");
+  if (yieldPct !== null && previousYieldPct === null) notes.push("前回公表値が欠測・未取得のため、前回比はN/Aです。");
+  else if (yieldPct !== null && changeBps === null) notes.push("前回比を検証できないため、変化幅はN/Aです。");
+  notes.push("土日・米国祝日などには新しい値が公表されない場合があります。");
+  if (data.calendarVerified !== true || data.latestSessionVerified !== true)
+    notes.push("休場日カレンダー・最新公表日との照合は未実施です。取得日時は観測日・公表時刻ではありません。");
+  return {
+    status: missing ? "unavailable" : stale ? "stale" : !retrievedAt || data.status === "unavailable" ? "unverified" : "received",
+    statusLabel: missing ? "欠測・未取得" : stale ? "STALE / 古い取得結果" : !retrievedAt || data.status === "unavailable" ? "取得状態未確認" : "取得済み / 日次公表値",
+    asOf, yieldPct, previousDate, previousYieldPct, changeBps, retrievedAt, checkedAt, observationAgeDays, notes,
+    yieldText: yieldPct === null ? "N/A" : `${yieldPct.toFixed(2)}%`,
+    previousText: previousYieldPct === null ? "N/A" : `${previousYieldPct.toFixed(2)}%`,
+    changeText: changeBps === null ? "N/A" : `${changeBps > 0 ? "+" : ""}${changeBps.toFixed(2).replace(/\.00$/, "")} bp`,
+    retrievedText: retrievedAt ? new Date(retrievedAt).toISOString().replace("T", " ").replace(/\.\d{3}Z$/, " UTC") : "N/A",
+    checkedText: checkedAt ? new Date(checkedAt).toISOString().replace("T", " ").replace(/\.\d{3}Z$/, " UTC") : "N/A",
+  };
+}
+
+// One first-view read per page session; subsequent reads require a manual retry.
+// Coalesces rapid clicks and React StrictMode mounts. No polling or persistence.
+function createTreasuryYieldStore({ fetcher = (...args) => fetch(...args), endpoint = "/api/treasury-yield" } = {}) {
+  let state = { payload: null, loading: false, attempted: false, requestFailed: false };
+  let request = null;
+  const listeners = new Set();
+  const notify = () => listeners.forEach(listener => listener(state));
+  return {
+    getState: () => state,
+    subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
+    load(force = false) {
+      if (request) return request;
+      if (state.attempted && !force) return Promise.resolve(state);
+      state = { ...state, loading: true, attempted: true };
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 30000);
+      request = Promise.resolve().then(async () => {
+        try {
+          const response = await fetcher(typeof endpoint === "function" ? endpoint() : endpoint, {
+            headers: { Accept: "application/json" }, credentials: "omit", cache: "no-store", signal: controller.signal,
+          });
+          const body = await response.json();
+          if (!body || typeof body !== "object" || Array.isArray(body) || !["fresh", "stale", "unavailable"].includes(body.status) || (!response.ok && response.status !== 503)) throw new Error("treasury_unavailable");
+          state = { ...state, payload: body, requestFailed: false };
+        } catch (_) {
+          state = { ...state, requestFailed: true };
+        } finally {
+          clearTimeout(timer);
+          state = { ...state, loading: false };
+          request = null;
+          notify();
+        }
+        return state;
+      });
+      notify();
+      return request;
+    },
+  };
+}
+
+const OfficialTreasuryYieldStore = createTreasuryYieldStore({ endpoint: () => (S.settings.apiBase || '').replace(/\/$/, '') + '/api/treasury-yield' });
+function fetchTreasuryYield(force = false) { return OfficialTreasuryYieldStore.load(force); }
+function renderTreasuryYieldPanel() {
+  const state = OfficialTreasuryYieldStore.getState(), view = treasuryYieldView(state.payload, { requestFailed: state.requestFailed });
+  return `<section class="panel treasury-panel ${view.status}" id="official-treasury-yield" aria-labelledby="treasury-yield-title" aria-busy="${state.loading}">
+    <div class="treasury-head"><div><span class="treasury-kicker">OFFICIAL DAILY DATA</span><h3 id="treasury-yield-title">米国10年国債利回り <small>米財務省公式</small></h3></div><button class="btn treasury-refresh" type="button" onclick="fetchTreasuryYield(true)" ${state.loading?'disabled':''}>${state.loading?'取得中…':'公式値を再取得'}</button></div>
+    <div class="treasury-status" role="status">${state.loading?'公式日次データを取得中…':esc(view.statusLabel)}</div>
+    <dl class="treasury-values"><div><dt>10年・パー利回り</dt><dd class="treasury-yield">${esc(view.yieldText)}</dd></div><div><dt>公表データ日 (as of)</dt><dd>${esc(view.asOf||'N/A')}</dd></div><div><dt>前回公表データ日</dt><dd>${esc(view.previousDate||'N/A')}</dd><small>前回値 ${esc(view.previousText)}</small></div><div><dt>前回公表値との差</dt><dd>${esc(view.changeText)}</dd><small>株価の上昇・下落予測ではありません</small></div></dl>
+    <div class="treasury-meta"><span>公式データ取得 ${esc(view.retrievedText)}</span><span>API確認 ${esc(view.checkedText)}</span></div>
+    <ul class="treasury-notes">${view.notes.map(note=>`<li>${esc(note)}</li>`).join('')}</ul><p class="treasury-method">${esc(TREASURY_METHOD_NOTE)}</p><a class="treasury-source" href="${esc(TREASURY_SOURCE_URL)}" target="_blank" rel="noopener noreferrer">出典：U.S. Department of the Treasury ↗</a>
+  </section>`;
+}
+OfficialTreasuryYieldStore.subscribe(() => {
+  const target = document.getElementById('official-treasury-yield');
+  if (!target) return;
+  // Update this panel only; do not restart the surrounding market views.
+  const focused = target.contains(document.activeElement);
+  target.outerHTML = renderTreasuryYieldPanel();
+  if (focused) document.querySelector('#official-treasury-yield .treasury-refresh')?.focus({ preventScroll: true });
+});
+/* ---- End official Treasury display ---- */
+
 const MARKET_REGIME_CACHE='uscmd_market_regime_v1';
 const MARKET_REGIME_LABELS={danger:'危険',caution:'警戒',neutral:'中立',optimistic:'楽観'};
 const MarketRegime={initialized:false,status:'idle',sourceStatus:'unavailable',asOf:'',updatedAt:'',dataRevision:'',label:'',labelText:'',riskScore:null,optimismScore:null,confidence:null,reasons:[],warnings:[],instruments:{vix:null,wti:null,spy:null},referenceOnly:true,watchOnly:true,tradeEligible:false,methodology:{},availability:{},meta:{},loading:false,fromCache:false,networkError:'',promptRevision:'',promptAsOf:'',contributions:[],lastAttemptAt:0};
@@ -2892,6 +3020,7 @@ function renderMkt(){
   <nav class="panel market-guide" id="market-guide" aria-label="市場画面のページ内移動"><b>市場のどこを見る？</b><div class="market-jumps"><button type="button" onclick="jumpMarketSection('market-risk-regime')">① 市場リスク</button><button type="button" onclick="jumpMarketSection('theme-intelligence-os')">② テーマ地図</button><button type="button" onclick="jumpMarketSection('theme-tracker')">③ 期間別リターン</button><button type="button" onclick="jumpMarketSection('market-ai-themes')">④ AI評価</button><button type="button" onclick="jumpMarketSection('market-watch-list')">⑤ 監視銘柄</button><button type="button" onclick="jumpMarketSection('market-news-feed')">⑥ ニュース</button></div><p>モデル得点・過去リターン・価格による推定フローは別の指標です。N/Aは未評価・欠損で、0を意味しません。</p></nav>
   ${movementMonitorPanel()}
   ${renderMarketRegimePanel()}
+  ${renderTreasuryYieldPanel()}
   ${renderIntelligenceOSPanel()}
   ${renderThemeTrackerPanel()}
   ${arenaPanel()}
@@ -4167,6 +4296,7 @@ function switchTab(t){
   const sec=$('#tab-'+t);
   renders[t]();
   if(t==='mkt')refreshMarketRegimeIfAged();
+  if(t==='mkt')fetchTreasuryYield();
   if(t==='buy')buySignalsInit();
   if(Math.random()<.15)shisa('normal',pick(SHISA.tips),5500);
   $('#fab').classList.toggle('show',t==='pos');
