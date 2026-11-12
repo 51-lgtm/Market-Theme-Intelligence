@@ -53,7 +53,7 @@
     box.setAttribute('aria-label', '画面の更新状況');
     box.style.cssText = 'grid-column:1/-1;display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:12px;line-height:1.5;color:#aebed1;margin:0 0 10px;overflow-wrap:anywhere';
     const label = doc.createElement('span');
-    label.textContent = '画面版 11/11・米金利';
+    label.textContent = '画面版 11/12・相場の読み解き';
     label.title = current;
     const status = doc.createElement('span');
     status.setAttribute('role', 'status');

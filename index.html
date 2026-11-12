@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
-<meta name="app-release" content="2026-11-11-treasury-1">
+<meta name="app-release" content="2026-11-12-observation-1">
 <script src="/app-updates.js" defer></script>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="description" content="日足・週足テクニカル、テーマ、ニュース、決算を統合し、SIMULATE専用の買い候補・監視・待機・回避を可視化する米国株司令室">
@@ -797,6 +797,11 @@ html{scroll-padding-top:calc(var(--hud-h) + env(safe-area-inset-top) + 38px)}
 /* Official Treasury observations are an independent display-only panel. */
 .treasury-panel{border-color:rgba(137,173,243,.25);min-width:0}.treasury-head{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}.treasury-kicker{color:var(--cyan);font:600 .65rem var(--num);letter-spacing:.12em}.treasury-head h3{font-size:.95rem;margin:5px 0}.treasury-head h3 small{font-size:.7rem;color:var(--mut);font-weight:400}.treasury-refresh{min-height:44px;padding:8px 12px}.treasury-status{font-size:.72rem;color:var(--mut);margin:8px 0 14px}.treasury-panel.stale .treasury-status,.treasury-panel.unavailable .treasury-status,.treasury-panel.unverified .treasury-status{color:var(--amber)}.treasury-values{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:0 0 14px}.treasury-values dt{color:var(--mut);font-size:.62rem;margin-bottom:6px}.treasury-values dd{font-family:var(--num);font-size:1.08rem;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}.treasury-values dd.treasury-yield{font-size:1.75rem}.treasury-values small{display:block;color:var(--mut);font-size:.6rem;margin-top:5px;line-height:1.5}.treasury-meta{display:flex;flex-wrap:wrap;gap:5px 18px;color:var(--mut);font-size:.62rem;overflow-wrap:anywhere}.treasury-notes{padding-left:17px;margin:12px 0;color:var(--amber);font-size:.67rem;line-height:1.65}.treasury-method{color:var(--mut);font-size:.67rem;line-height:1.65;margin:10px 0}.treasury-source{color:var(--cyan);font-size:.67rem;text-decoration:underline;text-underline-offset:3px;overflow-wrap:anywhere}
 @media(max-width:680px){.treasury-values{grid-template-columns:repeat(2,minmax(0,1fr));gap:17px 12px}.treasury-head h3 small{display:block;margin-top:4px}}
+
+
+/* Confirmed price observations and future checks, never a trading signal. */
+.market-observation-card{border-color:rgba(137,173,243,.24)}.observation-head{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap}.observation-head span{font:600 .65rem var(--num);letter-spacing:.12em;color:var(--cyan)}.observation-head h3{font-size:.95rem;margin:5px 0}.observation-head>b{font-size:.65rem;color:var(--mut);border:1px solid var(--line);border-radius:7px;padding:5px 7px}.market-observation-card.stale .observation-head>b,.market-observation-card.unavailable .observation-head>b{color:var(--amber)}.observation-scope{font-size:.7rem;line-height:1.7;color:var(--txt);padding:9px 11px;background:rgba(56,225,255,.04);border-left:2px solid var(--cyan);margin:8px 0}.observation-time{font-size:.66rem;color:var(--mut);line-height:1.65;margin:8px 0 12px;overflow-wrap:anywhere}.observation-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.observation-grid>div{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:11px;min-width:0}.observation-grid h4{font-size:.79rem;margin-bottom:8px;color:var(--txt)}.observation-grid p,.observation-grid li{font-size:.71rem;line-height:1.7;color:var(--mut);overflow-wrap:anywhere}.observation-grid small{display:block;font-size:.63rem;color:var(--dim);line-height:1.6}.observation-grid ul{padding-left:16px;margin:7px 0}.observation-grid li+li{margin-top:5px}.observation-quality{margin-top:12px;font-size:.66rem;line-height:1.65;color:var(--amber)}.observation-quality ul{padding-left:17px}.observation-limit,.observation-source{font-size:.65rem;line-height:1.7;color:var(--mut);margin-top:10px;overflow-wrap:anywhere}
+@media(max-width:480px){.observation-grid{grid-template-columns:1fr}.observation-grid>div{padding:10px 12px}}
 
 </style>
 </head>
@@ -1934,6 +1939,111 @@ OfficialTreasuryYieldStore.subscribe(() => {
 });
 /* ---- End official Treasury display ---- */
 
+
+/* ---- Market observation card: validated daily prices, not causal flows ---- */
+// Display-only explanation of existing confirmed daily market observations.
+// Never infer order flow, calculate a forecast, or feed AI/risk/execution.
+// Keep the legacy inline copy identical (checked by the UI tests).
+const MARKET_OBSERVATION_LIMITS = "条件は次の確定データで確認する項目で、勝率・目標株価・売買推奨ではありません。VIXは予想変動率であり、株価方向の予測ではありません。WTIは需給・在庫など複合要因と限月ロールの影響を受け、上昇・下落だけでは判定しません。";
+function observationDate(value) {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+  const time = Date.parse(value + "T00:00:00Z");
+  return Number.isFinite(time) && new Date(time).toISOString().slice(0, 10) === value ? value : null;
+}
+function observationTime(value, now) {
+  if (typeof value !== "string") return null;
+  const match = /^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,3})?(Z|[+-]\d{2}:\d{2})$/.exec(value);
+  if (!match || !observationDate(match[1]) || +match[2] > 23 || +match[3] > 59 || +match[4] > 59 || (match[5] !== "Z" && (+match[5].slice(1, 3) > 23 || +match[5].slice(4, 6) > 59))) return null;
+  const time = Date.parse(value);
+  return Number.isFinite(time) && time <= now + 300000 ? time : null;
+}
+function observationNumber(value, min, max) {
+  return typeof value === "number" && Number.isFinite(value) && value >= min && value <= max ? value : null;
+}
+function marketObservationView(raw, { now = Date.now(), stale = false, loading = false } = {}) {
+  const data = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+  const asOf = observationDate(data.asOf);
+  const dateMs = asOf ? Date.parse(asOf + "T00:00:00Z") : null;
+  const retrievedMs = observationTime(data.updatedAt, now);
+  const futureDate = dateMs !== null && dateMs > now;
+  const observedMs = observationTime(data.observedAt, now);
+  const expired = (observedMs !== null && now - observedMs > 96 * 3600000) || (dateMs !== null && now - dateMs > 5 * 86400000) || (retrievedMs !== null && now - retrievedMs > 86400000);
+  const instruments = data.indicators || data.instruments || {};
+  const isStale = Object.values(instruments).some(row => row?.stale === true || row?.status === "stale") || stale || data.status === "stale" || data.meta?.stale === true || data.meta?.observationStale === true || data.availability?.stale === true || expired;
+  const sync = data.availability?.synchronizedConfirmedSession;
+  const missing = [];
+  const specs = [["spy", "SPY", "SPY", "adjusted-close", 1, 100000], ["vix", "VIX", "^VIX", "native-index-close", 5, 200], ["wti", "WTI", "CL=F", "native-futures-close", .000001, 500]];
+  const observations = specs.map(([key, label, symbol, priceMode, min, max]) => {
+    const row = instruments[key] || {}, baseline = row.baselines?.["1d"] || {};
+    const date = observationDate(row.asOf), baselineDate = observationDate(baseline.date);
+    const value = observationNumber(Object.prototype.hasOwnProperty.call(row, "value") ? row.value : row.level, min, max);
+    const baselineValue = observationNumber(baseline.level, min, max);
+    const changePct = observationNumber(row.changesPct && Object.prototype.hasOwnProperty.call(row.changesPct, "1d") ? row.changesPct["1d"] : row.changes?.["1d"], -100, 10000);
+    const expectedPct = value !== null && baselineValue !== null ? (value / baselineValue - 1) * 100 : null;
+    const valid = row.symbol === symbol && ["ok", "partial"].includes(row.status) && row.available === true && row.stale !== true &&
+      row.priceMode === priceMode && date !== null && date === asOf && baselineDate !== null && baselineDate < date && baseline.exactSession === true &&
+      value !== null && baselineValue !== null && changePct !== null && expectedPct !== null && Math.abs(changePct - expectedPct) <= .0011;
+    if (!valid) missing.push(label);
+    return { key, label, valid, date, baselineDate, value, baselineValue, changePct, changePoints: valid ? value - baselineValue : null };
+  });
+  const baselineDate = observations[0].baselineDate;
+  const sameBaseline = baselineDate !== null && observations.every(row => row.baselineDate === baselineDate);
+  const knownStatus = ["ok", "partial"].includes(data.status);
+  const eligible = knownStatus && !isStale && !futureDate && retrievedMs !== null && asOf !== null &&
+    sync?.available === true && sync?.current === true && sync?.asOf === asOf &&
+    data.referenceOnly !== true && data.regime?.referenceOnly !== true && sameBaseline && missing.length === 0;
+  const partial = data.status === "partial" || data.partial === true;
+  const notes = [];
+  if (!knownStatus && data.status !== "stale") notes.push("取得状態が未確認のため、変化の比較を保留します。");
+  if (loading) notes.push("再取得中。表示がある場合は前回取得したデータです。");
+  if (isStale) notes.push("STALE：古い取得結果です。下記の確認条件が成立したとは判定しません。");
+  if (!asOf || futureDate) notes.push("終値基準日が欠測・不正のため比較できません。");
+  if (retrievedMs === null) notes.push("取得時刻が未確認・不正のため比較を保留します。");
+  if (missing.length) notes.push(`${missing.join("・")}：同日確定終値、前営業日比、または価格調整情報が欠測・未確認です。補完しません。`);
+  if (!sameBaseline || sync?.available !== true || sync?.current !== true || sync?.asOf !== asOf)
+    notes.push("同じ確定日・比較日を確認できないため、系列を組み合わせた解釈は保留します。");
+  if (data.referenceOnly === true || data.regime?.referenceOnly === true) notes.push("参考系列（未調整・混在を含む）のため、確認済みの変化として扱いません。");
+  if (eligible && partial) notes.push("部分取得です。ここでは検証できた1営業日変化のみを表示し、長期の欠測は補いません。");
+  notes.push("最新営業日・米国休場カレンダーとの照合は未確認。同じ日付のデータでも、最新値とは限りません。");
+  const signed = (value, digits = 2) => `${value > 0 ? "+" : ""}${value.toFixed(digits)}`;
+  const [spy, vix] = observations;
+  let headline = "確認できた変化はありません。条件の成立判定は保留です。";
+  if (eligible) {
+    headline = spy.changePct > 0 && vix.changePct < 0 ? "SPY上昇とVIX低下が同じ確定日に観測されています。" :
+      spy.changePct < 0 && vix.changePct > 0 ? "SPY下落とVIX上昇が同じ確定日に観測されています。" :
+      spy.changePct > 0 ? "SPYは上昇。VIX低下は同時に確認されていません。" :
+      "方向は下記のとおりです。上昇継続を断定できる観測ではありません。";
+  }
+  return {
+    eligible, stale: isStale, status: eligible ? (partial ? "partial" : "observed") : isStale ? "stale" : "unavailable",
+    statusLabel: eligible ? (partial ? "部分取得 / 1日変化を確認" : "同日確定値 / 1日変化を確認") : isStale ? "STALE / 判定保留" : "欠測・未確認 / 判定保留",
+    asOf: asOf && !futureDate ? asOf : null, baselineDate: eligible ? baselineDate : null,
+    retrievedText: retrievedMs === null ? "N/A" : new Date(retrievedMs).toISOString().replace("T", " ").replace(/\.\d{3}Z$/, " UTC"),
+    headline, notes,
+    scope: "価格・変動率の限定モデルで、好悪材料全体の評価ではありません。ニュース・業績は未評価で、既存の危険・楽観スコアへ加点・減点しません。",
+    changes: eligible ? observations.map(row => `${row.label} ${signed(row.changePct)}%${row.key === "vix" ? `（${signed(row.changePoints)}pt）` : ""}`) : [],
+    continuation: ["次の同日確定終値で、SPYの前営業日比プラスが続くか。", "同時にVIXが低下または横ばいか。単日の一致だけでは持続性を確定しない。"],
+    breakdown: ["次の確定終値でSPY下落とVIX上昇が重なるなら、上昇継続の見立てを再確認。", "日付不一致・欠測・STALEになった場合も判定を止める。原油の方向だけでは崩れと扱わない。"],
+    unconfirmed: ["ショートカバー・機関投資家の買い・ガンマの影響は未確認。SPY上昇＋VIX低下だけでは証明できない。", "主体別フロー・建玉・オプション保有情報は未取得。企業材料・業績の変化と値動きの因果関係も未確認。"],
+  };
+}
+
+let MarketObservationPayload = null;
+function renderMarketObservationCard() {
+  const view = marketObservationView(MarketObservationPayload, { stale: marketRegimeIsStale(), loading: MarketRegime.loading });
+  const list = rows => `<ul>${rows.map(row=>`<li>${esc(row)}</li>`).join('')}</ul>`;
+  return `<section class="panel market-observation-card ${view.status}" id="market-observation-card" aria-labelledby="market-observation-title">
+    <div class="observation-head"><div><span>DAILY PRICE CHECK</span><h3 id="market-observation-title">値動きと、次に確認すること</h3></div><b>${esc(view.statusLabel)}</b></div>
+    <p class="observation-scope">${esc(view.scope)}</p><p class="observation-time">終値基準日 ${esc(view.asOf||'N/A')} / 比較日 ${esc(view.baselineDate||'N/A')}<br>取得 ${esc(view.retrievedText)} / 1営業日変化（SPYの調整後終値基準）</p>
+    <div class="observation-grid"><div><h4>確認できた変化</h4><p>${esc(view.headline)}</p>${list(view.changes)}<small>価格の観測です。買い手の正体や値動きの原因は示しません。</small></div>
+      <div><h4>上昇継続の確認条件</h4><small>将来のチェック項目・現時点の成立宣言ではありません</small>${list(view.continuation)}</div>
+      <div><h4>崩れる条件</h4><small>上昇を前提にせず、見立てを見直すチェック項目</small>${list(view.breakdown)}</div>
+      <div><h4>未確認の需給</h4>${list(view.unconfirmed)}</div></div>
+    <div class="observation-quality">${list(view.notes)}</div><p class="observation-limit">${esc(MARKET_OBSERVATION_LIMITS)} このカードは表示専用で、危険スコア・AI・発注には接続しません。</p><p class="observation-source">出所：既存市場データAPI（Yahoo Finance・非公式・best effort）。WTIはCL=F期近連続先物です。</p>
+  </section>`;
+}
+/* ---- End market observation card ---- */
+
 const MARKET_REGIME_CACHE='uscmd_market_regime_v1';
 const MARKET_REGIME_LABELS={danger:'危険',caution:'警戒',neutral:'中立',optimistic:'楽観'};
 const MarketRegime={initialized:false,status:'idle',sourceStatus:'unavailable',asOf:'',updatedAt:'',dataRevision:'',label:'',labelText:'',riskScore:null,optimismScore:null,confidence:null,reasons:[],warnings:[],instruments:{vix:null,wti:null,spy:null},referenceOnly:true,watchOnly:true,tradeEligible:false,methodology:{},availability:{},meta:{},loading:false,fromCache:false,networkError:'',promptRevision:'',promptAsOf:'',contributions:[],lastAttemptAt:0};
@@ -2032,7 +2142,7 @@ function fetchMarketRegime(silent,forceRefresh){
 async function runMarketRegimeFetch(silent,forceRefresh){
   MarketRegime.loading=true;MarketRegime.lastAttemptAt=Date.now();MarketRegime.networkError='';if(!Object.values(MarketRegime.instruments).some(row=>row?.value!=null))MarketRegime.status='loading';if(!silent&&cur==='mkt')renderMkt();
   const base=(S.settings.apiBase||'').replace(/\/$/,''),path='/api/market-regime'+(forceRefresh===true?'?refresh=1':''),ctl=new AbortController(),timer=setTimeout(()=>ctl.abort(),60000);
-  try{const res=await fetch(base+path,{headers:S.settings.apiToken?{'Authorization':'Bearer '+S.settings.apiToken}:{},signal:ctl.signal,cache:'no-store'}),type=res.headers.get('content-type')||'';if(!type.includes('application/json'))throw new Error('市場レジームAPIがJSON以外を返しました');const body=await res.json();if(!res.ok)throw new Error(body?.message||`HTTP ${res.status}`);const data=normalizeMarketRegimePayload(body);if(!Object.values(data.instruments).some(row=>row.value!=null))throw new Error('市場レジームの観測値がありません');adoptMarketRegimePayload(data,false);store.set(MARKET_REGIME_CACHE,JSON.stringify(data));return true}
+  try{const res=await fetch(base+path,{headers:S.settings.apiToken?{'Authorization':'Bearer '+S.settings.apiToken}:{},signal:ctl.signal,cache:'no-store'}),type=res.headers.get('content-type')||'';if(!type.includes('application/json'))throw new Error('市場レジームAPIがJSON以外を返しました');const body=await res.json();if(!res.ok)throw new Error(body?.message||`HTTP ${res.status}`);const data=normalizeMarketRegimePayload(body);if(!Object.values(data.instruments).some(row=>row.value!=null))throw new Error('市場レジームの観測値がありません');MarketObservationPayload=body;adoptMarketRegimePayload(data,false);store.set(MARKET_REGIME_CACHE,JSON.stringify(data));return true}
   catch(error){MarketRegime.networkError=error?.name==='AbortError'?'市場レジームの取得がタイムアウトしました':safeText(error?.message||'市場レジームへ接続できません',300);if(Object.values(MarketRegime.instruments).some(row=>row?.value!=null)){MarketRegime.status='stale';MarketRegime.availability.partial=true}else MarketRegime.status='error';return false}
   finally{clearTimeout(timer);MarketRegime.loading=false;renderHUD();if(cur==='mkt')renderMkt();else if(cur==='ai')renderAI()}
 }
@@ -3021,6 +3131,7 @@ function renderMkt(){
   ${movementMonitorPanel()}
   ${renderMarketRegimePanel()}
   ${renderTreasuryYieldPanel()}
+  ${renderMarketObservationCard()}
   ${renderIntelligenceOSPanel()}
   ${renderThemeTrackerPanel()}
   ${arenaPanel()}
