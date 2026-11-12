@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
-<meta name="app-release" content="2026-11-12-observation-1">
+<meta name="app-release" content="2026-11-12-factors-1">
 <script src="/app-updates.js" defer></script>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="description" content="日足・週足テクニカル、テーマ、ニュース、決算を統合し、SIMULATE専用の買い候補・監視・待機・回避を可視化する米国株司令室">
@@ -803,6 +803,8 @@ html{scroll-padding-top:calc(var(--hud-h) + env(safe-area-inset-top) + 38px)}
 .market-observation-card{border-color:rgba(137,173,243,.24)}.observation-head{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap}.observation-head span{font:600 .65rem var(--num);letter-spacing:.12em;color:var(--cyan)}.observation-head h3{font-size:.95rem;margin:5px 0}.observation-head>b{font-size:.65rem;color:var(--mut);border:1px solid var(--line);border-radius:7px;padding:5px 7px}.market-observation-card.stale .observation-head>b,.market-observation-card.unavailable .observation-head>b{color:var(--amber)}.observation-scope{font-size:.7rem;line-height:1.7;color:var(--txt);padding:9px 11px;background:rgba(56,225,255,.04);border-left:2px solid var(--cyan);margin:8px 0}.observation-time{font-size:.66rem;color:var(--mut);line-height:1.65;margin:8px 0 12px;overflow-wrap:anywhere}.observation-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.observation-grid>div{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:11px;min-width:0}.observation-grid h4{font-size:.79rem;margin-bottom:8px;color:var(--txt)}.observation-grid p,.observation-grid li{font-size:.71rem;line-height:1.7;color:var(--mut);overflow-wrap:anywhere}.observation-grid small{display:block;font-size:.63rem;color:var(--dim);line-height:1.6}.observation-grid ul{padding-left:16px;margin:7px 0}.observation-grid li+li{margin-top:5px}.observation-quality{margin-top:12px;font-size:.66rem;line-height:1.65;color:var(--amber)}.observation-quality ul{padding-left:17px}.observation-limit,.observation-source{font-size:.65rem;line-height:1.7;color:var(--mut);margin-top:10px;overflow-wrap:anywhere}
 @media(max-width:480px){.observation-grid{grid-template-columns:1fr}.observation-grid>div{padding:10px 12px}}
 
+
+.factor-board{border:1px solid #397a91}.factor-verdict{font-size:21px;margin:16px 0 6px}.factor-sub{color:var(--mut);font-size:13px}.factor-totals{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:16px 0}.factor-totals>div{background:#102337;padding:12px;text-align:center;border-radius:12px}.factor-totals strong{display:block;font-size:30px;color:#7fe6ff}.factor-columns{display:grid;grid-template-columns:1fr 1fr;gap:12px}.factor-columns>div{padding:14px;border-radius:12px;background:#112336;border-top:3px solid #6be3c0}.factor-columns>.factor-negative{border-top-color:#f4ae82}.factor-columns ul{padding-left:20px}.factor-columns li{margin-bottom:15px}.factor-columns p{font-size:13px;line-height:1.7}.factor-columns small,.factor-detail small{color:var(--mut);line-height:1.8}.factor-board>p,.factor-board details p{font-size:13px;line-height:1.8}.factor-horizons{padding:12px 16px;background:#14283a;margin:15px 0;border-radius:12px;font-size:14px;line-height:1.8}.factor-board details{padding:12px 0;border-top:1px solid #294159}.factor-board summary{cursor:pointer;line-height:1.6}.factor-detail summary b{font-size:12px;color:var(--mut)}.factor-detail article{padding:10px}.factor-board a{color:#70dafa}.factor-board{overflow-wrap:anywhere}@media(max-width:620px){.factor-columns{grid-template-columns:1fr}.factor-verdict{font-size:18px}.factor-totals>div{font-size:12px}}
 </style>
 </head>
 <body>
@@ -2043,6 +2045,63 @@ function renderMarketObservationCard() {
   </section>`;
 }
 /* ---- End market observation card ---- */
+/* ---- Evidence balance ---- */
+/* Display-only, editorial evidence balance. No forecast or execution connection. */
+(function(root) {
+'use strict';
+const CATEGORIES = [ ['price','価格・変動率'], ['inflation','インフレ'], ['policy','金融政策・景気'], ['labor','雇用'], ['earnings','企業業績・資金調達'], ['credit','信用・流動性'], ['flows','ポジション・需給'] ];
+const METHOD = 'evidence-balance-v1';
+function validTime(s) { return typeof s === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(s) && Number.isFinite(Date.parse(s)); }
+function sourceUrl(s) {try {const u=new URL(s);return u.protocol==='https:'&&!u.username&&!u.password&&['www.bls.gov','www.federalreserve.gov','www.dol.gov','www.sec.gov'].includes(u.hostname)?u.href:null;}catch(_){return null;}}
+function evaluate(evidence, price, now=Date.now()) {
+ const rejected=[], seen=new Set(), accepted=[];
+ for(const row of Array.isArray(evidence)?evidence:[]) {
+  const key=row?.eventId;
+  const valid=row && typeof key==='string' && CATEGORIES.some(([id])=>id===row.category) && row.category!=='price' && sourceUrl(row.url) &&
+   validTime(row.publishedAt) && validTime(row.retrievedAt) && validTime(row.expiresAt) && Date.parse(row.publishedAt)<=Date.parse(row.retrievedAt) && Date.parse(row.retrievedAt)<=now && Date.parse(row.publishedAt)<=now && Date.parse(row.expiresAt)>now &&
+   Date.parse(row.expiresAt)>Date.parse(row.retrievedAt) && typeof row.title==='string' && typeof row.fact==='string' && typeof row.counter==='string' && typeof row.targetPeriod==='string' &&
+   [0,1].includes(row.support) && [0,1].includes(row.pressure) && row.verified===true;
+  if(!valid || seen.has(key)) { rejected.push({title:row?.title||'資料',reason:seen.has(key)?'同じ事象の重複を除外':'期限切れ・日時・出典・根拠の未確認'});continue; }
+  seen.add(key); accepted.push({...row,url:sourceUrl(row.url)});
+ }
+ if(price?.eligible===true && typeof price.asOf==='string' && typeof price.baselineDate==='string' && Number.isFinite(price.spy) && Number.isFinite(price.vix)) {
+  const support=price.spy>0&&price.vix<=0?1:0,pressure=price.spy<0&&price.vix>=0?1:0;
+  accepted.push({eventId:'daily-price-'+price.asOf,category:'price',title:'株価と予想変動率の同日確認',fact:`SPY ${price.spy.toFixed(2)}%、VIX ${price.vix.toFixed(2)}%（前営業日比）`,support,pressure,targetPeriod:price.baselineDate+' → '+price.asOf,publishedAt:null,retrievedAt:price.retrievedAt,expiresAt:null,url:'https://finance.yahoo.com/',counter:'価格反応であり原因ではありません。反対方向への転換で評価を見直します。',channel:'価格確認',verified:true});
+ }
+ const groups=CATEGORIES.map(([id,label])=>{const rows=accepted.filter(r=>r.category===id);return{id,label,rows,known:rows.length>0,support:rows.length?Math.min(1,rows.reduce((s,r)=>s+r.support,0)):null,pressure:rows.length?Math.min(1,rows.reduce((s,r)=>s+r.pressure,0)):null};});
+ const covered=groups.filter(g=>g.known).length, support=groups.reduce((s,g)=>s+(g.support??0),0),pressure=groups.reduce((s,g)=>s+(g.pressure??0),0),net=covered?support-pressure:null;
+ return{method:METHOD,groups,rejected,covered,total:groups.length,support:covered?support:null,pressure:covered?pressure:null,net,complete:covered===groups.length,headline:!covered?'判断保留：有効な根拠がありません':net>0?'確認できた範囲は支援材料優勢':net<0?'確認できた範囲は圧迫材料優勢':'確認できた範囲は拮抗',shortTerm:net>0?'価格の上昇継続を確認してから判断。好材料だけで高値を追わない。':net<0?'新規買いを急ぐ根拠は弱い。悪材料の後退と価格の持ち直しを確認。':'方向を決め打ちせず、次の公表値と価格反応を待つ。',longTerm:'企業別の売上・利益・キャッシュフロー・設備投資・希薄化・評価倍率の一次照合が必要。この市場点数から長期目標株価は算出しません。'};
+}
+root.MarketFactors={evaluate,CATEGORIES,METHOD};
+if(typeof module==='object'&&module.exports)module.exports=root.MarketFactors;
+})(typeof globalThis!=='undefined'?globalThis:this);
+
+/* Versioned research snapshot. Reviewed 2026-11-12, not continuous news monitoring. */
+const MARKET_FACTOR_EVIDENCE = [
+ {eventId:'bls-cpi-2026-10',category:'inflation',title:'物価の伸びはなお強い',fact:'10月CPIは前月比+0.4%、コア+0.3%。コアは3か月連続で+0.3%。',support:0,pressure:1,targetPeriod:'2026年10月（季節調整済み前月比）',publishedAt:'2026-11-10T13:30:00Z',retrievedAt:'2026-11-12T11:16:58Z',expiresAt:'2026-11-19T13:30:00Z',url:'https://www.bls.gov/news.release/archives/cpi_11102026.htm',verified:true,channel:'金利・評価倍率への逆風という分析判断',counter:'総合は9月+0.6%から鈍化。市場予想との差は未照合。2025年10月欠測のため大半の前年比は公表不可。'},
+ {eventId:'fomc-2026-10-28',category:'policy',title:'景気の強さと引締めリスクが綱引き',fact:'FRBは政策金利3.75〜4.00%を据置。賛成10、反対2。反対2名は0.25ポイントの利上げを支持。',support:1,pressure:1,targetPeriod:'2026年10月28日声明（現在の政策背景）',publishedAt:'2026-10-28T18:00:00Z',retrievedAt:'2026-11-12T11:16:58Z',expiresAt:'2026-11-19T13:30:00Z',url:'https://www.federalreserve.gov/newsevents/pressreleases/monetary20261028a.htm',verified:true,channel:'景気・投資の支えと、金利負担の両面',counter:'声明の景気・生産性・投資の強さは支え。一方、物価高は引締めリスク。同一声明の両面を表示し、差引き0。新材料とは扱わない。'},
+ {eventId:'bls-employment-2026-10',category:'labor',title:'雇用増は景気を下支え、賃金には注意',fact:'10月非農業雇用+16.5万人、失業率4.1%。8〜9月は計+8.4万人上方改定。',support:1,pressure:1,targetPeriod:'2026年10月（月次雇用統計）',publishedAt:'2026-11-06T13:30:00Z',retrievedAt:'2026-11-12T11:16:58Z',expiresAt:'2026-11-19T13:30:00Z',url:'https://www.bls.gov/news.release/archives/empsit_11062026.htm',verified:true,channel:'需要の支えと賃金圧力・雇用の質',counter:'時間給は前月比+0.4%。不本意なパート就業は+33.9万人。雇用増だけで株高と断定しない。週次失業保険の最新値は未統合。'}
+];
+if(typeof module==='object'&&module.exports)module.exports=MARKET_FACTOR_EVIDENCE;
+
+function renderMarketFactors() {
+ const priceView=marketObservationView(MarketObservationPayload,{stale:marketRegimeIsStale(),loading:MarketRegime.loading});
+ const instruments=MarketObservationPayload?.indicators||MarketObservationPayload?.instruments||{};
+ const price={...priceView,spy:instruments.spy?.changesPct?.['1d']??instruments.spy?.changes?.['1d'],vix:instruments.vix?.changesPct?.['1d']??instruments.vix?.changes?.['1d'],retrievedAt:MarketObservationPayload?.updatedAt};
+ const v=MarketFactors.evaluate(MARKET_FACTOR_EVIDENCE,price),sign=n=>n===null?'N/A':(n>0?'+':'')+n;
+ const rows=(side)=>v.groups.flatMap(g=>g.rows.filter(r=>r[side]>0).map(r=>`<li><b>${esc(r.title)}</b><p>${esc(r.fact)}</p><small>${esc(r.channel)} / ${side==='support'?'+1 支援':'−1 圧迫'}</small></li>`)).join('')||'<li>有効な材料なし</li>';
+ const details=v.groups.map(g=>`<details class="factor-detail"><summary>${esc(g.label)} <b>${g.known?'支援 '+g.support+' / 圧迫 '+g.pressure:'未確認・採点外'}</b></summary>${g.rows.map(r=>`<article><h4>${esc(r.title)}</h4><p>${esc(r.fact)}</p><p><b>反証・注意：</b>${esc(r.counter)}</p><small>対象 ${esc(r.targetPeriod)}<br>公表 ${esc(r.publishedAt||'終値の確定セッション。公表時刻は未確認')}<br>取得 ${esc(r.retrievedAt||'N/A')}<br>評価期限 ${esc(r.expiresAt||'価格観測カードの鮮度判定に従う')}</small><p><a href="${esc(r.url)}" target="_blank" rel="noopener noreferrer">出典を開く ↗</a></p></article>`).join('')||'<p>検証済みデータが未接続です。0点・中立として埋めず、集計から除外します。</p>'}</details>`).join('');
+ return `<section class="panel factor-board" id="market-factors" aria-labelledby="factor-title"><div class="observation-head"><div><span>EVIDENCE BALANCE / 11月12日版</span><h3 id="factor-title">好材料 × 悪材料の綱引き</h3></div><b>分析用・売買指示ではありません</b></div>
+ <h4 class="factor-verdict">${esc(v.headline)}</h4><p class="factor-sub">${v.complete?'全分類に検証済み入力あり':'総合判断は未完成'}：確認済み ${v.covered}/${v.total} 分類。未確認部分で結論は変わります。</p>
+ <div class="factor-totals"><div>支援材料<strong>${v.support??'N/A'}</strong></div><div>差引き<strong>${sign(v.net)}</strong></div><div>圧迫材料<strong>${v.pressure??'N/A'}</strong></div></div>
+ <p>点数は材料を整理する試験的ルールです。上昇確率・勝率・市場がまだ織り込んでいない度合いではありません。</p>
+ <div class="factor-columns"><div class="factor-positive"><h4>＋ 支えになる材料</h4><ul>${rows('support')}</ul></div><div class="factor-negative"><h4>− 重しになる材料</h4><ul>${rows('pressure')}</ul></div></div>
+ <div class="factor-horizons"><p><b>短期の読み方</b><br>${esc(v.shortTerm)}</p><p><b>長期の読み方</b><br>${esc(v.longTerm)}</p></div>
+ <details><summary>根拠・反証・データ時点を見る</summary>${details}${v.rejected.length?'<p>期限切れ等により除外：'+v.rejected.map(r=>esc(r.title)+'（'+esc(r.reason)+'）').join('、')+'</p>':''}</details>
+ <details><summary>採点方法と限界</summary><p>方式 ${esc(v.method)}。7分類を同じ重みで扱い、各分類の支援・圧迫をそれぞれ最大1点に制限。両面のある材料は双方に1点で差引き0。同じ事象は重複除外。確認済み分類だけを合計し、欠測を0や推定値で補いません。SPYとVIXは価格確認1分類にまとめ二重加点しません。金利・原油は変化の原因次第で意味が異なるため自動加点しません。</p><p>ニュース部分は11/12に一次資料を確認した期限付きスナップショット。自動ニュース判定ではなく、ページ再読込で記事内容が更新されるわけではありません。未来・期限切れの材料は除外。公表日時・取得日時はUTC（日本時間は+9時間）。価格は通常取引の確定日足で、リアルタイムではありません。</p><p>市場予想との差・織込み・業績・信用スプレッド・主体別フローは未統合。ショートカバーやガンマを価格から断定しません。過去検証は未実施。将来検証では当時公表値と改定履歴を分離します。この点数を既存AI・リスク制御・発注へ接続しません。</p></details></section>`;
+}
+
+/* ---- End evidence balance ---- */
 
 const MARKET_REGIME_CACHE='uscmd_market_regime_v1';
 const MARKET_REGIME_LABELS={danger:'危険',caution:'警戒',neutral:'中立',optimistic:'楽観'};
@@ -3127,10 +3186,11 @@ function renderMkt(){
   const news={};(S.news||[]).forEach(n=>{const k=n.h;if(!news[k]||new Date(n.at)>new Date(news[k].at))news[k]=n});
   const nlist=Object.values(news).sort((a,b)=>new Date(b.at)-new Date(a.at));
   $('#tab-mkt').innerHTML=`
-  <nav class="panel market-guide" id="market-guide" aria-label="市場画面のページ内移動"><b>市場のどこを見る？</b><div class="market-jumps"><button type="button" onclick="jumpMarketSection('market-risk-regime')">① 市場リスク</button><button type="button" onclick="jumpMarketSection('theme-intelligence-os')">② テーマ地図</button><button type="button" onclick="jumpMarketSection('theme-tracker')">③ 期間別リターン</button><button type="button" onclick="jumpMarketSection('market-ai-themes')">④ AI評価</button><button type="button" onclick="jumpMarketSection('market-watch-list')">⑤ 監視銘柄</button><button type="button" onclick="jumpMarketSection('market-news-feed')">⑥ ニュース</button></div><p>モデル得点・過去リターン・価格による推定フローは別の指標です。N/Aは未評価・欠損で、0を意味しません。</p></nav>
+  <nav class="panel market-guide" id="market-guide" aria-label="市場画面のページ内移動"><b>市場のどこを見る？</b><div class="market-jumps"><button type="button" onclick="jumpMarketSection('market-factors')">好材料 × 悪材料</button><button type="button" onclick="jumpMarketSection('market-risk-regime')">① 市場リスク</button><button type="button" onclick="jumpMarketSection('theme-intelligence-os')">② テーマ地図</button><button type="button" onclick="jumpMarketSection('theme-tracker')">③ 期間別リターン</button><button type="button" onclick="jumpMarketSection('market-ai-themes')">④ AI評価</button><button type="button" onclick="jumpMarketSection('market-watch-list')">⑤ 監視銘柄</button><button type="button" onclick="jumpMarketSection('market-news-feed')">⑥ ニュース</button></div><p>モデル得点・過去リターン・価格による推定フローは別の指標です。N/Aは未評価・欠損で、0を意味しません。</p></nav>
   ${movementMonitorPanel()}
   ${renderMarketRegimePanel()}
   ${renderTreasuryYieldPanel()}
+  ${renderMarketFactors()}
   ${renderMarketObservationCard()}
   ${renderIntelligenceOSPanel()}
   ${renderThemeTrackerPanel()}

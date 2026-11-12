@@ -102,7 +102,7 @@ test('legacy mirrors exact validator and renders four named sections with escape
 
 test('new card only uses an already-successful market-regime response, creates no fetch or risk wiring',()=>{
   assert.match(html,/MarketObservationPayload=body;adoptMarketRegimePayload\(data,false\)/);
-  assert.match(html,/\$\{renderTreasuryYieldPanel\(\)\}\s+\$\{renderMarketObservationCard\(\)\}/);
+  assert.match(html,/\$\{renderTreasuryYieldPanel\(\)\}\s+\$\{renderMarketFactors\(\)\}\s+\$\{renderMarketObservationCard\(\)\}/);
   assert.doesNotMatch(shared,/fetch\(|setInterval|localStorage|tradeEligible|riskScore\s*:/);
   const prompt=html.slice(html.indexOf('function marketRegimePromptContext()'),html.indexOf('function renderMarketRegimePanel()'));
   assert.doesNotMatch(prompt,/MarketObservationPayload|marketObservationView|renderMarketObservationCard/);

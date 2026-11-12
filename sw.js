@@ -1,7 +1,7 @@
 /* US COMMAND ULTRA v14.0.0 — technical buy-signal watch system */
 'use strict';
 
-const CACHE = 'uscmd-v14-observation-20261112';
+const CACHE = 'uscmd-v14-factors-20261112';
 const SHELL = ['/', '/index.html', '/app-updates.js', '/manifest.json', '/icon-192.png', '/icon-512.png'];
 const CACHEABLE_PATHS = new Set(SHELL);
 
